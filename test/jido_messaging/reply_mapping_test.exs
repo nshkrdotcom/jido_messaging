@@ -213,7 +213,7 @@ defmodule Jido.Messaging.ReplyMappingTest do
       incoming = %{
         external_room_id: "chat_ext_reply",
         external_user_id: "user_1",
-        text: "LegacyMessage to reply to",
+        text: "Message to reply to",
         external_message_id: "msg_to_reply_ext"
       }
 

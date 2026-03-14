@@ -3,7 +3,6 @@ defmodule Jido.Messaging.ModerationTest do
 
   alias Jido.Messaging.Moderation
   alias Jido.Messaging.Moderators.{KeywordFilter, RateLimiter}
-  alias Jido.Chat.LegacyMessage
   alias Jido.Chat.Content.Text
 
   defmodule AllowAllModerator do
@@ -151,7 +150,7 @@ defmodule Jido.Messaging.ModerationTest do
     end
 
     test "handles empty content" do
-      message = %LegacyMessage{
+      message = %Jido.Messaging.Message{
         id: "msg_1",
         room_id: "room_1",
         sender_id: "user_1",
@@ -166,7 +165,7 @@ defmodule Jido.Messaging.ModerationTest do
 
     test "handles string key map content" do
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: "room_1",
           sender_id: "user_1",
           role: :user,
@@ -180,7 +179,7 @@ defmodule Jido.Messaging.ModerationTest do
 
     test "handles non-text content blocks" do
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: "room_1",
           sender_id: "user_1",
           role: :user,
@@ -269,7 +268,7 @@ defmodule Jido.Messaging.ModerationTest do
   end
 
   defp build_message(text) do
-    LegacyMessage.new(%{
+    Jido.Messaging.Message.new(%{
       room_id: "room_1",
       sender_id: "user_1",
       role: :user,
@@ -278,7 +277,7 @@ defmodule Jido.Messaging.ModerationTest do
   end
 
   defp build_message_with_struct(text) do
-    LegacyMessage.new(%{
+    Jido.Messaging.Message.new(%{
       room_id: "room_1",
       sender_id: "user_1",
       role: :user,

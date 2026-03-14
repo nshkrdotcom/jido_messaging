@@ -1,492 +1,564 @@
 defmodule Jido.Messaging.AgentRunnerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import Jido.Messaging.TestHelpers
 
-  alias Jido.Chat.{LegacyMessage, Room}
-  alias Jido.Messaging.{RoomServer, RoomSupervisor, AgentRunner, AgentSupervisor}
+  alias Jido.Messaging.{AgentRunner, Ingest, Message}
 
   defmodule TestMessaging do
     use Jido.Messaging, persistence: Jido.Messaging.Persistence.ETS
   end
 
+  defmodule NotifyChannel do
+    @behaviour Jido.Chat.Adapter
+
+    @impl true
+    def channel_type, do: :notify
+
+    @impl true
+    def transform_incoming(_), do: {:error, :not_implemented}
+
+    @impl true
+    def send_message(room_id, text, opts) do
+      send(notify_pid(), {:channel_send, room_id, text, opts})
+      {:ok, %{message_id: "sent-" <> Integer.to_string(System.unique_integer([:positive]))}}
+    end
+
+    @impl true
+    def open_thread(external_room_id, external_message_id, opts) do
+      result = %{
+        external_thread_id: "thread-" <> to_string(external_message_id),
+        delivery_external_room_id: "delivery-" <> to_string(external_message_id)
+      }
+
+      send(notify_pid(), {:thread_opened, external_room_id, external_message_id, opts, result})
+      {:ok, result}
+    end
+
+    defp notify_pid do
+      :persistent_term.get({__MODULE__, :notify_pid})
+    end
+  end
+
   setup do
     start_supervised!(TestMessaging)
+    :persistent_term.put({NotifyChannel, :notify_pid}, self())
+
+    on_exit(fn ->
+      :persistent_term.erase({NotifyChannel, :notify_pid})
+    end)
+
     :ok
   end
 
-  describe "AgentRunner lifecycle" do
-    test "starts an agent runner via supervisor" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  describe "thread-scoped runner lifecycle" do
+    test "assign_thread/3 starts a runner keyed by room, thread, and agent" do
+      room = create_room!("runner-room")
+      thread = create_thread!(room.id, "ext-thread-1")
 
-      agent_config = %{
-        name: "TestBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
-      }
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      assert {:ok, pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "test_bot", agent_config)
-      assert is_pid(pid)
-      assert Process.alive?(pid)
+      assert {:ok, assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+      assert assigned_thread.assigned_agent_id == "alpha"
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end)
     end
 
-    test "stops an agent runner" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "assign_thread/3 is idempotent when the thread is already assigned to the same agent" do
+      room = create_room!("runner-idempotent-room")
+      thread = create_thread!(room.id, "ext-thread-idempotent")
 
-      agent_config = %{
-        name: "TestBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
-      }
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      {:ok, pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "test_bot", agent_config)
-      ref = Process.monitor(pid)
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-      assert :ok = AgentSupervisor.stop_agent(TestMessaging, room.id, "test_bot")
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end)
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 100
+      pid = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
 
-      # Registry cleanup may lag slightly behind process termination
-      assert_eventually(fn -> AgentRunner.whereis(TestMessaging, room.id, "test_bot") == nil end)
+      assert {:ok, reassigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+      assert reassigned_thread.assigned_agent_id == "alpha"
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+      assert AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == pid
     end
 
-    test "stop_agent returns error when agent not found" do
-      assert {:error, :not_found} = AgentSupervisor.stop_agent(TestMessaging, "nonexistent", "bot")
-    end
+    test "register_agent/3 restores persisted thread assignments for that agent" do
+      room = create_room!("runner-restore-room")
 
-    test "whereis returns pid for running agent" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      agent_config = %{
-        name: "TestBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
-      }
-
-      {:ok, pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "test_bot", agent_config)
-      assert AgentRunner.whereis(TestMessaging, room.id, "test_bot") == pid
-    end
-
-    test "whereis returns nil for non-running agent" do
-      assert nil == AgentRunner.whereis(TestMessaging, "nonexistent_room", "nonexistent_agent")
-    end
-
-    test "list_agents returns agents in room" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      config1 = %{name: "Bot1", trigger: :all, handler: fn _, _ -> :noreply end}
-      config2 = %{name: "Bot2", trigger: :all, handler: fn _, _ -> :noreply end}
-
-      {:ok, pid1} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot1", config1)
-      {:ok, pid2} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot2", config2)
-
-      agents = AgentSupervisor.list_agents(TestMessaging, room.id)
-      assert length(agents) == 2
-      assert {"bot1", pid1} in agents
-      assert {"bot2", pid2} in agents
-    end
-
-    test "count_agents returns correct count" do
-      assert AgentSupervisor.count_agents(TestMessaging) == 0
-
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
-
-      {:ok, _} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot1", config)
-      assert AgentSupervisor.count_agents(TestMessaging) == 1
-
-      {:ok, _} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot2", config)
-      assert AgentSupervisor.count_agents(TestMessaging) == 2
-    end
-  end
-
-  describe "message processing with trigger :all" do
-    test "agent processes all messages" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      test_pid = self()
-
-      agent_config = %{
-        name: "EchoBot",
-        trigger: :all,
-        handler: fn message, _context ->
-          send(test_pid, {:received, message.id})
-          :noreply
-        end
-      }
-
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "echo_bot", agent_config)
-
-      message =
-        LegacyMessage.new(%{
+      {:ok, thread} =
+        TestMessaging.save_thread(%{
           room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hello!"}]
+          external_thread_id: "ext-thread-restored",
+          delivery_external_room_id: "delivery-restored",
+          assigned_agent_id: "alpha"
         })
 
-      RoomServer.add_message(room_pid, message)
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      assert_receive {:received, message_id}, 1000
-      assert message_id == message.id
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end)
     end
 
-    test "agent does not process its own messages" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "assign_thread/3 rejects threads from a different room" do
+      room_a = create_room!("runner-room-a")
+      room_b = create_room!("runner-room-b")
+      thread = create_thread!(room_a.id, "ext-thread-room-a")
 
-      test_pid = self()
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room_b.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      agent_config = %{
-        name: "EchoBot",
-        trigger: :all,
-        handler: fn message, _context ->
-          send(test_pid, {:received, message.id})
-          :noreply
-        end
-      }
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.assign_thread(room_b.id, thread.id, "alpha")
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "echo_bot", agent_config)
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.thread_assignment(room_b.id, thread.id)
 
-      own_message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "echo_bot",
-          role: :assistant,
-          content: [%{type: :text, text: "My own message"}]
-        })
-
-      RoomServer.add_message(room_pid, own_message)
-
-      refute_receive {:received, _}, 100
-    end
-  end
-
-  describe "message processing with trigger :mention" do
-    test "agent processes messages that mention it" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      test_pid = self()
-
-      agent_config = %{
-        name: "HelpBot",
-        trigger: :mention,
-        handler: fn message, _context ->
-          send(test_pid, {:mentioned, message.id})
-          :noreply
-        end
-      }
-
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "help_bot", agent_config)
-
-      message_with_mention =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hey @HelpBot can you help?"}]
-        })
-
-      RoomServer.add_message(room_pid, message_with_mention)
-
-      assert_receive {:mentioned, _}, 1000
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.unassign_thread(room_b.id, thread.id)
     end
 
-    test "agent ignores messages without mention" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "thread assignment APIs reject threads from a nonexistent room id" do
+      room = create_room!("runner-room-real")
+      thread = create_thread!(room.id, "ext-thread-real")
 
-      test_pid = self()
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      agent_config = %{
-        name: "HelpBot",
-        trigger: :mention,
-        handler: fn message, _context ->
-          send(test_pid, {:mentioned, message.id})
-          :noreply
-        end
-      }
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "help_bot", agent_config)
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.assign_thread("missing-room", thread.id, "alpha")
 
-      message_without_mention =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Just a regular message"}]
-        })
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.thread_assignment("missing-room", thread.id)
 
-      RoomServer.add_message(room_pid, message_without_mention)
-
-      refute_receive {:mentioned, _}, 100
-    end
-  end
-
-  describe "message processing with trigger {:prefix, prefix}" do
-    test "agent processes messages with matching prefix" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      test_pid = self()
-
-      agent_config = %{
-        name: "CmdBot",
-        trigger: {:prefix, "/cmd"},
-        handler: fn message, _context ->
-          send(test_pid, {:command, message.id})
-          :noreply
-        end
-      }
-
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "cmd_bot", agent_config)
-
-      message_with_prefix =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "/cmd do something"}]
-        })
-
-      RoomServer.add_message(room_pid, message_with_prefix)
-
-      assert_receive {:command, _}, 1000
+      assert {:error, :thread_room_mismatch} =
+               TestMessaging.unassign_thread("missing-room", thread.id)
     end
 
-    test "agent ignores messages without matching prefix" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "thread_assignment/3 falls back to the persisted assignment when room state drifts" do
+      room = create_room!("runner-fallback-room")
+      thread = create_thread!(room.id, "ext-thread-fallback")
 
-      test_pid = self()
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      agent_config = %{
-        name: "CmdBot",
-        trigger: {:prefix, "/cmd"},
-        handler: fn message, _context ->
-          send(test_pid, {:command, message.id})
-          :noreply
-        end
-      }
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+      room_server = ensure_room_server!(room)
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "cmd_bot", agent_config)
-
-      message_without_prefix =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "No prefix here"}]
-        })
-
-      RoomServer.add_message(room_pid, message_without_prefix)
-
-      refute_receive {:command, _}, 100
+      assert :ok = Jido.Messaging.RoomServer.unassign_thread(room_server, thread.id)
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
     end
-  end
 
-  describe "reply generation and delivery" do
-    test "agent sends reply when handler returns {:reply, text}" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "assign_thread/3 rolls back persisted and room state when the agent supervisor is unavailable" do
+      room = create_room!("runner-start-failure-room")
+      thread = create_thread!(room.id, "ext-thread-start-failure")
 
-      agent_config = %{
-        name: "EchoBot",
-        trigger: :all,
-        handler: fn message, _context ->
-          text =
-            message.content
-            |> Enum.filter(&Map.has_key?(&1, :text))
-            |> Enum.map(& &1.text)
-            |> Enum.join(" ")
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-          {:reply, "Echo: #{text}"}
-        end
-      }
+      room_server = ensure_room_server!(room)
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "echo_bot", agent_config)
+      with_agent_supervisor_unavailable(TestMessaging, fn ->
+        assert {:error, {:supervisor_unavailable, _reason}} =
+                 Jido.Messaging.AgentSupervisor.start_agent(
+                   TestMessaging,
+                   room.id,
+                   thread.id,
+                   "alpha",
+                   %{agent_id: "alpha", name: "Alpha", handler: fn _, _ -> :noreply end}
+                 )
 
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hello!"}]
-        })
+        assert {:error, {:start_agent_failed, {:supervisor_unavailable, _reason}}} =
+                 TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-      RoomServer.add_message(room_pid, message)
+        assert {:ok, nil} = TestMessaging.thread_assignment(room.id, thread.id)
+        assert Jido.Messaging.RoomServer.thread_assignment(room_server, thread.id) == nil
+
+        assert {:ok, persisted_thread} = TestMessaging.get_thread(thread.id)
+        assert is_nil(persisted_thread.assigned_agent_id)
+        assert AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
+      end)
+    end
+
+    test "agent supervisor restart rehydrates assigned runners" do
+      room = create_room!("runner-supervisor-restart-room")
+      thread = create_thread!(room.id, "ext-thread-restart")
+
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
+
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end, timeout: 500)
+
+      original_runner = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
+      agent_supervisor_name = TestMessaging.__jido_messaging__(:agent_supervisor)
+      original_supervisor = Process.whereis(agent_supervisor_name)
+      assert is_pid(original_supervisor)
+
+      Process.exit(original_supervisor, :kill)
+
+      assert_eventually(fn ->
+        restarted_supervisor = Process.whereis(agent_supervisor_name)
+        restarted_runner = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
+
+        is_pid(restarted_supervisor) and restarted_supervisor != original_supervisor and
+          is_pid(restarted_runner) and restarted_runner != original_runner
+      end, timeout: 1_000)
+
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+    end
+
+    test "room server restart restores registered agents and thread assignments from live runners" do
+      room = create_room!("runner-room-restart-room")
+      thread = create_thread!(room.id, "ext-thread-room-restart")
+
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
+
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end, timeout: 500)
+
+      original_room_server = ensure_room_server!(room)
+      runner_pid = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
+      ref = Process.monitor(original_room_server)
+
+      assert :ok = TestMessaging.stop_room_server(room.id)
+      assert_receive {:DOWN, ^ref, :process, ^original_room_server, _reason}, 500
+      assert AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == runner_pid
+
+      {:ok, restarted_room_server} = TestMessaging.get_or_start_room_server(room)
+      assert Process.alive?(restarted_room_server)
 
       assert_eventually(
         fn ->
-          messages = RoomServer.get_messages(room_pid)
-          length(messages) == 2
+          with {:ok, agents} <- TestMessaging.list_agents(room.id) do
+            Enum.any?(agents, &(&1.agent_id == "alpha")) and
+              Jido.Messaging.RoomServer.thread_assignment(restarted_room_server, thread.id) == "alpha"
+          else
+            _ -> false
+          end
         end,
         timeout: 500
       )
 
-      messages = RoomServer.get_messages(room_pid)
-      [reply, original] = messages
-      assert original.id == message.id
-      assert reply.sender_id == "echo_bot"
-      assert reply.role == :assistant
-      assert reply.reply_to_id == message.id
-
-      [content | _] = reply.content
-      assert content.text == "Echo: Hello!"
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
     end
+  end
 
-    test "agent does not send reply when handler returns :noreply" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  describe "thread-scoped message handling" do
+    test "runners only receive messages from their assigned thread" do
+      test_pid = self()
+      room = create_room!("routing-room")
+      thread_a = create_thread!(room.id, "thread-a")
+      thread_b = create_thread!(room.id, "thread-b")
 
-      agent_config = %{
-        name: "SilentBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
+      assert {:ok, _alpha_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn message, _context ->
+                   send(test_pid, {:alpha_received, message.thread_id, message.id})
+                   :noreply
+                 end
+               })
+
+      assert {:ok, _beta_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "beta",
+                 name: "Beta",
+                 handler: fn message, _context ->
+                   send(test_pid, {:beta_received, message.thread_id, message.id})
+                   :noreply
+                 end
+               })
+
+      {:ok, _} = TestMessaging.assign_thread(room.id, thread_a.id, "alpha")
+      {:ok, _} = TestMessaging.assign_thread(room.id, thread_b.id, "beta")
+
+      room_pid = ensure_room_server!(room)
+
+      :ok =
+        Jido.Messaging.RoomServer.add_message(
+          room_pid,
+          message(room.id, "user-1", thread_a.id, "hello alpha"),
+          nil
+        )
+
+      :ok =
+        Jido.Messaging.RoomServer.add_message(
+          room_pid,
+          message(room.id, "user-2", thread_b.id, "hello beta"),
+          nil
+        )
+
+      thread_a_id = thread_a.id
+      thread_b_id = thread_b.id
+
+      assert_receive {:alpha_received, ^thread_a_id, _message_id}, 1_000
+      assert_receive {:beta_received, ^thread_b_id, _message_id}, 1_000
+      refute_receive {:alpha_received, ^thread_b_id, _message_id}, 100
+      refute_receive {:beta_received, ^thread_a_id, _message_id}, 100
+    end
+  end
+
+  describe "auto-assignment from ingress" do
+    test "a single logical agent mention opens a thread, assigns it, and routes the reply there" do
+      test_pid = self()
+
+      {:ok, room} =
+        TestMessaging.get_or_create_room_by_external_binding(
+          :notify,
+          "bridge-auto",
+          "room-auto",
+          %{type: :channel}
+        )
+
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn message, _context ->
+                   send(test_pid, {:agent_handled, message.id, message.thread_id})
+                   {:reply, "handled by alpha"}
+                 end
+               })
+
+      incoming = %{
+        external_room_id: "room-auto",
+        external_user_id: "user-1",
+        external_message_id: "root-1",
+        text: "@alpha please handle this",
+        chat_type: :channel
       }
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "silent_bot", agent_config)
+      assert {:ok, message, context} =
+               Ingest.ingest_incoming(TestMessaging, NotifyChannel, "bridge-auto", incoming)
 
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hello!"}]
-        })
+      assert message.thread_id
+      assert context.thread_id == message.thread_id
 
-      RoomServer.add_message(room_pid, message)
+      assert_receive {:thread_opened, "room-auto", "root-1", _opts, result}, 1_000
+      assert result.external_thread_id == "thread-root-1"
 
-      # Give the agent time to process (it should not reply)
-      # We wait briefly and verify no additional messages appeared
-      assert_eventually(
-        fn ->
-          # Agent should have processed by now, verify only 1 message
-          messages = RoomServer.get_messages(room_pid)
-          length(messages) == 1
-        end,
-        timeout: 200
-      )
+      assert {:ok, [thread]} = TestMessaging.list_threads(room.id)
+      assert thread.id == message.thread_id
+      assert thread.external_thread_id == "thread-root-1"
+      assert thread.delivery_external_room_id == "delivery-root-1"
+      assert thread.root_message_id == message.id
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+
+      message_id = message.id
+      thread_id = thread.id
+      assert_receive {:agent_handled, ^message_id, ^thread_id}, 1_000
+
+      assert_receive {:channel_send, "delivery-root-1", "handled by alpha", opts}, 1_000
+      assert opts[:external_thread_id] == "thread-root-1"
+      assert opts[:delivery_external_room_id] == "delivery-root-1"
     end
-  end
 
-  describe "agent appears as participant" do
-    test "agent is added as participant when started" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "ambiguous agent mentions do not auto-assign a thread" do
+      {:ok, room} =
+        TestMessaging.get_or_create_room_by_external_binding(
+          :notify,
+          "bridge-ambiguous",
+          "room-ambiguous",
+          %{type: :channel}
+        )
 
-      agent_config = %{
-        name: "TestBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
+      for agent_id <- ["alpha", "beta"] do
+        assert {:ok, _agent_spec} =
+                 TestMessaging.register_agent(room.id, %{
+                   agent_id: agent_id,
+                   name: String.capitalize(agent_id),
+                   handler: fn _, _ -> {:reply, "should not run"} end
+                 })
+      end
+
+      incoming = %{
+        external_room_id: "room-ambiguous",
+        external_user_id: "user-1",
+        external_message_id: "root-2",
+        text: "@alpha @beta who should handle this?",
+        chat_type: :channel
       }
 
-      {:ok, _agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "test_bot", agent_config)
+      assert {:ok, message, context} =
+               Ingest.ingest_incoming(TestMessaging, NotifyChannel, "bridge-ambiguous", incoming)
 
-      participants = RoomServer.get_participants(room_pid)
-      assert length(participants) == 1
-
-      [participant] = participants
-      assert participant.id == "test_bot"
-      assert participant.type == :agent
-      assert participant.identity.name == "TestBot"
-      assert participant.presence == :online
+      assert is_nil(message.thread_id)
+      assert is_nil(context.thread_id)
+      assert {:ok, []} = TestMessaging.list_threads(room.id)
+      refute_receive {:thread_opened, _, _, _, _}, 200
+      refute_receive {:channel_send, _, _, _}, 200
     end
   end
 
-  describe "delegated functions in instance module" do
-    test "add_agent_to_room delegates to AgentSupervisor" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  describe "agent unregistration" do
+    test "unregister_agent/2 clears persisted thread assignments" do
+      room = create_room!("runner-unregister-room")
+      thread = create_thread!(room.id, "ext-thread-unregister")
 
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      assert {:ok, pid} = TestMessaging.add_agent_to_room(room.id, "test_bot", config)
-      assert is_pid(pid)
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
+
+      assert :ok = TestMessaging.unregister_agent(room.id, "alpha")
+      assert {:ok, nil} = TestMessaging.thread_assignment(room.id, thread.id)
+
+      assert {:ok, persisted_thread} = TestMessaging.get_thread(thread.id)
+      assert is_nil(persisted_thread.assigned_agent_id)
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
+      end, timeout: 500)
     end
 
-    test "remove_agent_from_room delegates to AgentSupervisor" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+    test "unregister_agent/2 clears persisted assignments even when room state lost the thread mapping" do
+      room = create_room!("runner-unregister-drift-room")
+      thread = create_thread!(room.id, "ext-thread-unregister-drift")
 
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
-      {:ok, _pid} = TestMessaging.add_agent_to_room(room.id, "test_bot", config)
+      assert {:ok, _agent_spec} =
+               TestMessaging.register_agent(room.id, %{
+                 agent_id: "alpha",
+                 name: "Alpha",
+                 handler: fn _, _ -> :noreply end
+               })
 
-      assert :ok = TestMessaging.remove_agent_from_room(room.id, "test_bot")
-    end
+      assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-    test "list_agents_in_room delegates to AgentSupervisor" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+      end)
 
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
-      {:ok, pid} = TestMessaging.add_agent_to_room(room.id, "test_bot", config)
+      room_server = ensure_room_server!(room)
+      assert :ok = Jido.Messaging.RoomServer.unassign_thread(room_server, thread.id)
+      assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
 
-      agents = TestMessaging.list_agents_in_room(room.id)
-      assert {"test_bot", pid} in agents
-    end
+      assert :ok = TestMessaging.unregister_agent(room.id, "alpha")
+      assert {:ok, nil} = TestMessaging.thread_assignment(room.id, thread.id)
 
-    test "whereis_agent delegates to AgentRunner" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
-      {:ok, pid} = TestMessaging.add_agent_to_room(room.id, "test_bot", config)
-
-      assert TestMessaging.whereis_agent(room.id, "test_bot") == pid
-    end
-
-    test "count_agents delegates to AgentSupervisor" do
-      assert TestMessaging.count_agents() == 0
-
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      config = %{name: "TestBot", trigger: :all, handler: fn _, _ -> :noreply end}
-      {:ok, _pid} = TestMessaging.add_agent_to_room(room.id, "test_bot", config)
-
-      assert TestMessaging.count_agents() == 1
-    end
-
-    test "__jido_messaging__ returns agent registry and supervisor names" do
-      assert TestMessaging.__jido_messaging__(:agent_registry) ==
-               Module.concat(TestMessaging, Registry.Agents)
-
-      assert TestMessaging.__jido_messaging__(:agent_supervisor) ==
-               Module.concat(TestMessaging, :AgentSupervisor)
+      assert {:ok, persisted_thread} = TestMessaging.get_thread(thread.id)
+      assert is_nil(persisted_thread.assigned_agent_id)
+      assert_eventually(fn ->
+        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
+      end, timeout: 500)
     end
   end
 
-  describe "RoomServer.get_agent_pids/2" do
-    test "returns list of agent PIDs for a room" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  defp create_room!(name) do
+    {:ok, room} = TestMessaging.create_room(%{type: :group, name: name})
+    room
+  end
 
-      config1 = %{name: "Bot1", trigger: :all, handler: fn _, _ -> :noreply end}
-      config2 = %{name: "Bot2", trigger: :all, handler: fn _, _ -> :noreply end}
+  defp create_thread!(room_id, external_thread_id) do
+    {:ok, thread} =
+      TestMessaging.save_thread(%{
+        room_id: room_id,
+        external_thread_id: external_thread_id,
+        delivery_external_room_id: "delivery-" <> external_thread_id
+      })
 
-      {:ok, pid1} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot1", config1)
-      {:ok, pid2} = AgentSupervisor.start_agent(TestMessaging, room.id, "bot2", config2)
+    thread
+  end
 
-      pids = RoomServer.get_agent_pids(TestMessaging, room.id)
-      assert length(pids) == 2
-      assert pid1 in pids
-      assert pid2 in pids
-    end
+  defp ensure_room_server!(room) do
+    {:ok, pid} = TestMessaging.get_or_start_room_server(room)
+    pid
+  end
 
-    test "returns empty list when no agents in room" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  defp message(room_id, sender_id, thread_id, text) do
+    Message.new(%{
+      room_id: room_id,
+      sender_id: sender_id,
+      role: :user,
+      content: [%{type: :text, text: text}],
+      thread_id: thread_id
+    })
+  end
 
-      assert RoomServer.get_agent_pids(TestMessaging, room.id) == []
+  defp with_agent_supervisor_unavailable(instance_module, fun) when is_atom(instance_module) and is_function(fun, 0) do
+    supervisor_name = instance_module.__jido_messaging__(:supervisor)
+    agent_supervisor_name = instance_module.__jido_messaging__(:agent_supervisor)
+    supervisor_pid = Process.whereis(supervisor_name)
+    agent_supervisor_pid = Process.whereis(agent_supervisor_name)
+
+    assert is_pid(supervisor_pid)
+    assert is_pid(agent_supervisor_pid)
+
+    :ok = :sys.suspend(supervisor_pid)
+    Process.exit(agent_supervisor_pid, :kill)
+
+    assert_eventually(fn ->
+      Process.whereis(agent_supervisor_name) == nil
+    end, timeout: 500)
+
+    try do
+      fun.()
+    after
+      :ok = :sys.resume(supervisor_pid)
+
+      assert_eventually(fn ->
+        is_pid(Process.whereis(agent_supervisor_name))
+      end, timeout: 500)
     end
   end
 end

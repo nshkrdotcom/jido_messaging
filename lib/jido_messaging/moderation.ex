@@ -30,7 +30,7 @@ defmodule Jido.Messaging.Moderation do
   - `{:modify, message}` - Message is modified (e.g., content filtered)
   """
 
-  alias Jido.Chat.LegacyMessage
+  alias Jido.Messaging.Message
 
   @type reason :: atom()
   @type description :: String.t()
@@ -38,7 +38,7 @@ defmodule Jido.Messaging.Moderation do
           :allow
           | {:reject, reason(), description()}
           | {:flag, reason(), description()}
-          | {:modify, LegacyMessage.t()}
+          | {:modify, Message.t()}
 
   @doc """
   Moderate a message before it is processed.
@@ -46,7 +46,7 @@ defmodule Jido.Messaging.Moderation do
   Returns a moderation result indicating whether the message should be
   allowed, rejected, flagged, or modified.
   """
-  @callback moderate(message :: LegacyMessage.t(), opts :: keyword()) :: result()
+  @callback moderate(message :: Message.t(), opts :: keyword()) :: result()
 
   @doc """
   Apply a list of moderators to a message in sequence.

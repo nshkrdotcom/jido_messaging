@@ -48,12 +48,14 @@ defmodule Jido.Messaging.MsgContext do
               # Threading
               reply_to_id: Zoi.string() |> Zoi.nullish(),
               external_reply_to_id: Zoi.string() |> Zoi.nullish(),
-              thread_root_id: Zoi.string() |> Zoi.nullish(),
+              thread_id: Zoi.string() |> Zoi.nullish(),
               external_thread_id: Zoi.string() |> Zoi.nullish(),
+              delivery_external_room_id: Zoi.string() |> Zoi.nullish(),
 
               # Mention tracking
               was_mentioned: Zoi.boolean() |> Zoi.default(false),
               mentions: Zoi.array(Zoi.map()) |> Zoi.default([]),
+              agent_mentions: Zoi.array(Zoi.string()) |> Zoi.default([]),
 
               # Parsed command (populated by application/channel)
               command: Zoi.map() |> Zoi.nullish(),
@@ -125,6 +127,8 @@ defmodule Jido.Messaging.MsgContext do
       # Threading
       external_reply_to_id: stringify_if_present(incoming[:external_reply_to_id]),
       external_thread_id: stringify_if_present(incoming[:external_thread_id]),
+      delivery_external_room_id:
+        stringify_if_present(incoming[:delivery_external_room_id] || incoming[:external_room_id]),
 
       # Mention tracking
       was_mentioned: incoming[:was_mentioned] || false,
@@ -157,24 +161,10 @@ defmodule Jido.Messaging.MsgContext do
         participant_id: participant.id,
         message_id: message.id,
         reply_to_id: message.reply_to_id,
-        thread_root_id: message.thread_root_id
-    }
-  end
-
-  @doc """
-  Converts the MsgContext to a legacy context map for backward compatibility.
-
-  This is useful during migration from the old context format.
-  """
-  @spec to_legacy_context(t()) :: map()
-  def to_legacy_context(%__MODULE__{} = ctx) do
-    %{
-      room: %{id: ctx.room_id},
-      participant: %{id: ctx.participant_id},
-      channel: ctx.channel_module,
-      bridge_id: ctx.bridge_id,
-      external_room_id: ctx.external_room_id,
-      instance_module: nil
+        thread_id: message.thread_id,
+        external_thread_id: message.external_thread_id || ctx.external_thread_id,
+        delivery_external_room_id:
+          message.delivery_external_room_id || ctx.delivery_external_room_id
     }
   end
 

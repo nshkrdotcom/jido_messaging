@@ -203,7 +203,7 @@ defmodule Jido.Messaging.SignalTest do
         nil
       )
 
-      message = %Jido.Chat.LegacyMessage{
+      message = %Jido.Messaging.Message{
         id: "msg_test",
         room_id: "room_123",
         sender_id: "sender_456",
@@ -238,7 +238,7 @@ defmodule Jido.Messaging.SignalTest do
         nil
       )
 
-      message = %Jido.Chat.LegacyMessage{
+      message = %Jido.Messaging.Message{
         id: "msg_sent",
         room_id: "room_789",
         sender_id: "system",

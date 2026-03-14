@@ -66,7 +66,7 @@ defmodule Jido.Messaging.Signal do
   Emits a `:received` signal when a message has been ingested.
 
   ## Metadata
-  - `:message` - the ingested `Jido.Chat.LegacyMessage` struct
+  - `:message` - the ingested `Jido.Messaging.Message` struct
   - `:room_id` - the room ID where the message was received
   - `:participant_id` - the sender's participant ID
   - `:channel` - the channel module that received the message
@@ -75,7 +75,7 @@ defmodule Jido.Messaging.Signal do
   - `:timestamp` - when the event occurred
   - `:correlation_id` - message ID or generated ID for tracing
   """
-  @spec emit_received(Jido.Chat.LegacyMessage.t(), map()) :: :ok
+  @spec emit_received(Jido.Messaging.Message.t(), map()) :: :ok
   def emit_received(message, context) do
     timestamp = DateTime.utc_now()
     correlation_id = message.id || generate_correlation_id()
@@ -106,7 +106,7 @@ defmodule Jido.Messaging.Signal do
   Emits a `:sent` signal when a message has been delivered successfully.
 
   ## Metadata
-  - `:message` - the sent `Jido.Chat.LegacyMessage` struct
+  - `:message` - the sent `Jido.Messaging.Message` struct
   - `:room_id` - the room ID where the message was sent
   - `:channel` - the channel module used for delivery
   - `:external_room_id` - the external room identifier
@@ -115,7 +115,7 @@ defmodule Jido.Messaging.Signal do
   - `:timestamp` - when the event occurred
   - `:correlation_id` - message ID or generated ID for tracing
   """
-  @spec emit_sent(Jido.Chat.LegacyMessage.t(), map()) :: :ok
+  @spec emit_sent(Jido.Messaging.Message.t(), map()) :: :ok
   def emit_sent(message, context) do
     timestamp = DateTime.utc_now()
     correlation_id = message.id || generate_correlation_id()
@@ -390,6 +390,7 @@ defmodule Jido.Messaging.Signal do
     %{
       message_id: message.id,
       room_id: message.room_id,
+      thread_id: Map.get(message, :thread_id),
       sender_id: message.sender_id,
       role: message.role,
       status: message.status,

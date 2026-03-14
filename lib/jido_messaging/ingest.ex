@@ -21,10 +21,11 @@ defmodule Jido.Messaging.Ingest do
 
   require Logger
 
-  alias Jido.Chat.LegacyMessage
   alias Jido.Chat.Content.Text
 
   alias Jido.Messaging.{
+    Context,
+    Message,
     MediaPolicy,
     MsgContext,
     MsgContext.Normalizer,
@@ -34,7 +35,8 @@ defmodule Jido.Messaging.Ingest do
     Security,
     SessionKey,
     SessionManager,
-    Signal
+    Signal,
+    Thread
   }
 
   @type incoming :: Jido.Chat.Incoming.t() | map()
@@ -44,15 +46,7 @@ defmodule Jido.Messaging.Ingest do
   @type ingest_error :: policy_denial() | security_denial() | term()
   @type ingest_opts :: keyword()
 
-  @type context :: %{
-          room: Jido.Chat.Room.t(),
-          participant: Jido.Chat.Participant.t(),
-          channel: module(),
-          bridge_id: String.t(),
-          external_room_id: term(),
-          instance_module: module(),
-          msg_context: MsgContext.t()
-        }
+  @type context :: Context.t()
 
   @default_policy_timeout_ms 50
   @default_timeout_fallback :deny
@@ -67,7 +61,7 @@ defmodule Jido.Messaging.Ingest do
   Returns `{:ok, :duplicate}` if the message has already been processed.
   """
   @spec ingest_incoming(module(), module(), String.t(), incoming()) ::
-          {:ok, LegacyMessage.t(), context()} | {:ok, :duplicate} | {:error, ingest_error()}
+          {:ok, Message.t(), context()} | {:ok, :duplicate} | {:error, ingest_error()}
   def ingest_incoming(messaging_module, channel_module, bridge_id, incoming) do
     ingest_incoming(messaging_module, channel_module, bridge_id, incoming, [])
   end
@@ -94,7 +88,7 @@ defmodule Jido.Messaging.Ingest do
     * `:mentions_max_text_bytes` - Max message size for mention adapter parsing
   """
   @spec ingest_incoming(module(), module(), String.t(), incoming(), ingest_opts()) ::
-          {:ok, LegacyMessage.t(), context()} | {:ok, :duplicate} | {:error, ingest_error()}
+          {:ok, Message.t(), context()} | {:ok, :duplicate} | {:error, ingest_error()}
   def ingest_incoming(messaging_module, channel_module, bridge_id, incoming, opts)
       when is_list(opts) do
     channel_type = Jido.Messaging.AdapterBridge.channel_type(channel_module)
@@ -128,7 +122,7 @@ defmodule Jido.Messaging.Ingest do
   or when deduplication is handled externally.
   """
   @spec ingest_incoming!(module(), module(), String.t(), incoming()) ::
-          {:ok, LegacyMessage.t(), context()} | {:error, ingest_error()}
+          {:ok, Message.t(), context()} | {:error, ingest_error()}
   def ingest_incoming!(messaging_module, channel_module, bridge_id, incoming) do
     ingest_incoming!(messaging_module, channel_module, bridge_id, incoming, [])
   end
@@ -137,7 +131,7 @@ defmodule Jido.Messaging.Ingest do
   Process an incoming message without deduplication check and with ingest policy options.
   """
   @spec ingest_incoming!(module(), module(), String.t(), incoming(), ingest_opts()) ::
-          {:ok, LegacyMessage.t(), context()} | {:error, ingest_error()}
+          {:ok, Message.t(), context()} | {:error, ingest_error()}
   def ingest_incoming!(messaging_module, channel_module, bridge_id, incoming, opts)
       when is_list(opts) do
     channel_type = Jido.Messaging.AdapterBridge.channel_type(channel_module)
@@ -169,24 +163,55 @@ defmodule Jido.Messaging.Ingest do
     with {:ok, verify_result} <-
            Security.verify_sender(messaging_module, channel_module, incoming, raw_payload, opts),
          {:ok, room} <- resolve_room(messaging_module, channel_type, bridge_id, incoming),
+         {:ok, room_server} <- RoomSupervisor.get_or_start_room(messaging_module, room),
          {:ok, participant} <- resolve_participant(messaging_module, channel_type, incoming),
-         {:ok, message} <-
-           build_message(messaging_module, room, participant, incoming, channel_type, bridge_id, opts),
-         message <- put_verify_metadata(message, verify_result),
          msg_context <- build_msg_context(channel_module, bridge_id, incoming, room, participant, opts),
+         {:ok, thread} <-
+           resolve_thread_scope(
+             messaging_module,
+             channel_module,
+             room_server,
+             room,
+             incoming,
+             msg_context,
+             opts
+           ),
+         {:ok, message} <-
+           build_message(
+             messaging_module,
+             room,
+             participant,
+             thread,
+             incoming,
+             channel_type,
+             bridge_id,
+             opts
+           ),
+         message <- put_verify_metadata(message, verify_result),
          {:ok, policy_message} <- apply_policy_pipeline(message, msg_context, opts),
          {:ok, persisted_message} <- messaging_module.save_message_struct(policy_message) do
+      thread = maybe_backfill_thread_root(messaging_module, thread, persisted_message)
       resolved_msg_context = MsgContext.with_resolved(msg_context, room, participant, persisted_message)
+      resolved_msg_context = put_thread_context(resolved_msg_context, thread, persisted_message, external_room_id)
 
-      context = %{
-        room: room,
-        participant: participant,
-        channel: channel_module,
-        bridge_id: bridge_id,
-        external_room_id: external_room_id,
-        instance_module: messaging_module,
-        msg_context: resolved_msg_context
-      }
+      context =
+        Context.new(%{
+          room: room,
+          participant: participant,
+          thread: thread,
+          channel: channel_module,
+          bridge_id: bridge_id,
+          channel_type: channel_type,
+          external_room_id: to_string(external_room_id),
+          external_thread_id: resolved_msg_context.external_thread_id,
+          delivery_external_room_id:
+            resolved_msg_context.delivery_external_room_id || to_string(external_room_id),
+          room_id: room.id,
+          thread_id: resolved_msg_context.thread_id,
+          participant_id: participant.id,
+          instance_module: messaging_module,
+          msg_context: resolved_msg_context
+        })
 
       persist_session_route(
         messaging_module,
@@ -197,7 +222,8 @@ defmodule Jido.Messaging.Ingest do
         external_room_id
       )
 
-      add_to_room_server(messaging_module, room, persisted_message, participant)
+      ensure_thread_runner(messaging_module, room, room_server, thread)
+      add_to_room_server(messaging_module, room, persisted_message, participant, context)
 
       Logger.debug("[Jido.Messaging.Ingest] Message #{persisted_message.id} ingested in room #{room.id}")
 
@@ -219,8 +245,9 @@ defmodule Jido.Messaging.Ingest do
       channel_type: channel_type,
       bridge_id: bridge_id,
       room_id: room.id,
-      thread_id: msg_context.thread_root_id || msg_context.external_thread_id,
-      external_room_id: to_string(external_room_id)
+      thread_id: msg_context.thread_id || msg_context.external_thread_id,
+      external_room_id:
+        to_string(msg_context.delivery_external_room_id || external_room_id)
     }
 
     case SessionManager.set(messaging_module, SessionKey.from_context(msg_context), route) do
@@ -276,7 +303,7 @@ defmodule Jido.Messaging.Ingest do
     )
   end
 
-  defp build_message(messaging_module, room, participant, incoming, channel_type, bridge_id, opts) do
+  defp build_message(messaging_module, room, participant, thread, incoming, channel_type, bridge_id, opts) do
     with {:ok, content, media_metadata} <- build_content(incoming, opts) do
       reply_to_id = resolve_reply_to_id(messaging_module, channel_type, bridge_id, incoming)
 
@@ -287,11 +314,17 @@ defmodule Jido.Messaging.Ingest do
         content: content,
         reply_to_id: reply_to_id,
         external_id: incoming[:external_message_id],
+        external_reply_to_id: stringify_if_present(incoming[:external_reply_to_id]),
+        thread_id: thread && thread.id,
+        external_thread_id:
+          incoming[:external_thread_id] || (thread && thread.external_thread_id),
+        delivery_external_room_id:
+          incoming[:delivery_external_room_id] || (thread && thread.delivery_external_room_id),
         status: :sent,
         metadata: build_metadata(incoming, channel_type, bridge_id, media_metadata)
       }
 
-      {:ok, LegacyMessage.new(message_attrs)}
+      {:ok, Message.new(message_attrs)}
     end
   end
 
@@ -303,6 +336,235 @@ defmodule Jido.Messaging.Ingest do
       %{msg_context | room_id: room.id, participant_id: participant.id}
     end)
   end
+
+  defp resolve_thread_scope(
+         messaging_module,
+         channel_module,
+         room_server,
+         room,
+         incoming,
+         %MsgContext{} = msg_context,
+         opts
+       ) do
+    case incoming[:external_thread_id] do
+      external_thread_id when is_binary(external_thread_id) ->
+        get_or_create_thread(
+          messaging_module,
+          room.id,
+          %{
+            external_thread_id: external_thread_id,
+            delivery_external_room_id:
+              stringify_if_present(incoming[:delivery_external_room_id] || incoming[:external_room_id]),
+            root_external_message_id: stringify_if_present(incoming[:external_reply_to_id]),
+            metadata: %{source: :incoming_thread}
+          }
+        )
+        |> maybe_assign_thread(messaging_module, room_server, room.id, msg_context)
+
+      _ ->
+        maybe_open_thread_for_assignment(
+          messaging_module,
+          channel_module,
+          room_server,
+          room,
+          incoming,
+          msg_context,
+          opts
+        )
+    end
+  end
+
+  defp maybe_open_thread_for_assignment(
+         messaging_module,
+         channel_module,
+         room_server,
+         room,
+         incoming,
+         %MsgContext{} = msg_context,
+         _opts
+       ) do
+    case resolve_target_agent(room_server, msg_context.agent_mentions) do
+      {:ok, agent_id} ->
+        if incoming[:external_message_id] do
+          with {:ok, result} <-
+                 Jido.Chat.Adapter.open_thread(
+                   channel_module,
+                   incoming.external_room_id,
+                   incoming.external_message_id,
+                   open_thread_opts(msg_context, incoming)
+                 ),
+               {:ok, thread} <-
+                 get_or_create_thread(messaging_module, room.id, %{
+                   external_thread_id:
+                     stringify_if_present(
+                       result[:external_thread_id] || result["external_thread_id"]
+                     ),
+                   delivery_external_room_id:
+                     stringify_if_present(
+                       result[:delivery_external_room_id] || result["delivery_external_room_id"] ||
+                         incoming[:external_room_id]
+                     ),
+                   root_external_message_id: stringify_if_present(incoming[:external_message_id]),
+                   metadata: %{source: :opened_from_root}
+                 }),
+               {:ok, assigned_thread} <-
+                 assign_resolved_thread(messaging_module, room_server, room.id, thread, agent_id) do
+            {:ok, assigned_thread}
+          else
+            {:error, :unsupported} -> {:ok, nil}
+            {:error, _reason} -> {:ok, nil}
+          end
+        else
+          {:ok, nil}
+        end
+
+      _ ->
+        {:ok, nil}
+    end
+  end
+
+  defp get_or_create_thread(messaging_module, room_id, attrs) do
+    external_thread_id = attrs[:external_thread_id]
+
+    if is_binary(external_thread_id) do
+      case messaging_module.get_thread_by_external_id(room_id, external_thread_id) do
+        {:ok, thread} ->
+          {:ok, merge_thread_fields(messaging_module, thread, attrs)}
+
+        {:error, :not_found} ->
+          messaging_module.save_thread(Map.put(attrs, :room_id, room_id))
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp merge_thread_fields(messaging_module, %Thread{} = thread, attrs) do
+    updated_thread =
+      thread
+      |> Map.merge(%{
+        delivery_external_room_id:
+          attrs[:delivery_external_room_id] || thread.delivery_external_room_id,
+        root_external_message_id:
+          attrs[:root_external_message_id] || thread.root_external_message_id,
+        metadata: Map.merge(thread.metadata || %{}, attrs[:metadata] || %{}),
+        updated_at: DateTime.utc_now()
+      })
+
+    {:ok, persisted_thread} = messaging_module.save_thread_struct(updated_thread)
+    persisted_thread
+  end
+
+  defp maybe_assign_thread({:ok, nil}, _messaging_module, _room_server, _room_id, _msg_context), do: {:ok, nil}
+
+  defp maybe_assign_thread({:ok, %Thread{} = thread}, messaging_module, room_server, room_id, msg_context) do
+    case resolve_target_agent(room_server, msg_context.agent_mentions) do
+      {:ok, agent_id} -> assign_resolved_thread(messaging_module, room_server, room_id, thread, agent_id)
+      _ -> {:ok, thread}
+    end
+  end
+
+  defp maybe_assign_thread({:error, _reason} = error, _messaging_module, _room_server, _room_id, _msg_context),
+    do: error
+
+  defp assign_resolved_thread(_messaging_module, _room_server, _room_id, %Thread{assigned_agent_id: agent_id} = thread, agent_id),
+    do: {:ok, thread}
+
+  defp assign_resolved_thread(messaging_module, _room_server, room_id, %Thread{} = thread, agent_id) do
+    case Jido.Messaging.assign_thread(messaging_module, room_id, thread.id, agent_id) do
+      {:ok, assigned_thread} -> {:ok, assigned_thread}
+      {:error, _reason} -> {:ok, thread}
+    end
+  end
+
+  defp resolve_target_agent(_room_server, []), do: {:error, :no_agent_mentions}
+
+  defp resolve_target_agent(room_server, [mention]) do
+    normalized = String.downcase(mention)
+
+    room_server
+    |> RoomServer.list_agents()
+    |> Enum.find(fn agent_spec ->
+      normalized in Map.get(agent_spec, :mention_handles, [])
+    end)
+    |> case do
+      nil -> {:error, :unknown_agent}
+      agent_spec -> {:ok, agent_spec.agent_id}
+    end
+  end
+
+  defp resolve_target_agent(_room_server, _mentions), do: {:error, :ambiguous_agent_mentions}
+
+  defp open_thread_opts(msg_context, incoming) do
+    [
+      topic_name: build_topic_name(msg_context, incoming),
+      agent_mentions: msg_context.agent_mentions,
+      external_thread_id: incoming[:external_thread_id]
+    ]
+  end
+
+  defp build_topic_name(%MsgContext{body: body, agent_mentions: [agent | _]}, _incoming)
+       when is_binary(body) do
+    trimmed = body |> String.trim() |> String.slice(0, 40)
+    "@" <> agent <> if(trimmed == "", do: "", else: " " <> trimmed)
+  end
+
+  defp build_topic_name(_msg_context, incoming) do
+    "thread-" <> stringify_if_present(incoming[:external_message_id] || Jido.Chat.ID.generate!())
+  end
+
+  defp maybe_backfill_thread_root(_messaging_module, nil, _message), do: nil
+
+  defp maybe_backfill_thread_root(messaging_module, %Thread{root_message_id: nil} = thread, message) do
+    updated_thread = %{
+      thread
+      | root_message_id: message.id,
+        root_external_message_id: thread.root_external_message_id || message.external_id,
+        updated_at: DateTime.utc_now()
+    }
+
+    {:ok, persisted_thread} = messaging_module.save_thread_struct(updated_thread)
+    persisted_thread
+  end
+
+  defp maybe_backfill_thread_root(_messaging_module, %Thread{} = thread, _message), do: thread
+
+  defp put_thread_context(%MsgContext{} = msg_context, nil, message, external_room_id) do
+    %{
+      msg_context
+      | thread_id: message.thread_id,
+        external_thread_id: message.external_thread_id,
+        delivery_external_room_id:
+          message.delivery_external_room_id || stringify_if_present(external_room_id)
+    }
+  end
+
+  defp put_thread_context(%MsgContext{} = msg_context, %Thread{} = thread, _message, external_room_id) do
+    %{
+      msg_context
+      | thread_id: thread.id,
+        external_thread_id: thread.external_thread_id,
+        delivery_external_room_id:
+          thread.delivery_external_room_id || stringify_if_present(external_room_id)
+    }
+  end
+
+  defp ensure_thread_runner(_messaging_module, _room, _room_server, nil), do: :ok
+
+  defp ensure_thread_runner(messaging_module, room, room_server, %Thread{assigned_agent_id: agent_id, id: thread_id})
+       when is_binary(agent_id) and is_binary(thread_id) do
+    case RoomServer.get_agent(room_server, agent_id) do
+      {:ok, agent_spec} ->
+        _ = Jido.Messaging.assign_thread(messaging_module, room.id, thread_id, agent_id)
+        _ = agent_spec
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp ensure_thread_runner(_messaging_module, _room, _room_server, _thread), do: :ok
 
   defp resolve_reply_to_id(messaging_module, channel_type, bridge_id, incoming) do
     external_reply_to_id = incoming[:external_reply_to_id]
@@ -344,7 +606,7 @@ defmodule Jido.Messaging.Ingest do
     end
   end
 
-  defp put_verify_metadata(%LegacyMessage{} = message, %{decision: decision, metadata: metadata}) do
+  defp put_verify_metadata(%Message{} = message, %{decision: decision, metadata: metadata}) do
     security_metadata =
       Map.get(message.metadata, :security, %{})
       |> Map.put(
@@ -529,7 +791,7 @@ defmodule Jido.Messaging.Ingest do
                  |> append_decision(decision)
                  |> append_flag(flag)}}
 
-             {:ok, {:modify, %LegacyMessage{} = modified_message}, elapsed_ms} ->
+             {:ok, {:modify, %Message{} = modified_message}, elapsed_ms} ->
                decision = build_decision(:moderation, moderator, :modify, elapsed_ms)
                emit_policy_telemetry(decision)
                merged_message = merge_modified_message(current_message, modified_message)
@@ -685,7 +947,7 @@ defmodule Jido.Messaging.Ingest do
     end
   end
 
-  defp merge_modified_message(%LegacyMessage{} = original, %LegacyMessage{} = modified) do
+  defp merge_modified_message(%Message{} = original, %Message{} = modified) do
     merged_metadata =
       Map.merge(original.metadata || %{}, modified.metadata || %{})
 
@@ -698,8 +960,9 @@ defmodule Jido.Messaging.Ingest do
         reply_to_id: original.reply_to_id,
         external_id: original.external_id,
         external_reply_to_id: original.external_reply_to_id,
-        thread_root_id: original.thread_root_id,
+        thread_id: original.thread_id,
         external_thread_id: original.external_thread_id,
+        delivery_external_room_id: original.delivery_external_room_id,
         status: original.status,
         inserted_at: original.inserted_at,
         metadata: merged_metadata
@@ -808,14 +1071,18 @@ defmodule Jido.Messaging.Ingest do
   defp normalize_prefixes(prefixes) when is_list(prefixes), do: CommandParser.normalize_prefixes(prefixes)
   defp normalize_prefixes(_), do: []
 
-  defp add_to_room_server(messaging_module, room, message, participant) do
+  defp add_to_room_server(messaging_module, room, message, participant, context) do
     case RoomSupervisor.get_or_start_room(messaging_module, room) do
       {:ok, pid} ->
-        RoomServer.add_message(pid, message)
+        RoomServer.add_message(pid, message, context)
         RoomServer.add_participant(pid, participant)
 
       {:error, reason} ->
         Logger.warning("[Jido.Messaging.Ingest] Failed to start room server: #{inspect(reason)}")
     end
   end
+
+  defp stringify_if_present(nil), do: nil
+  defp stringify_if_present(value) when is_binary(value), do: value
+  defp stringify_if_present(value), do: to_string(value)
 end

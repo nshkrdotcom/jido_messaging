@@ -86,7 +86,7 @@ defmodule Jido.Messaging.IntegrationTest do
         incoming = %{
           external_room_id: "persistent_chat",
           external_user_id: "user_#{i}",
-          text: "LegacyMessage #{i}",
+          text: "Message #{i}",
           external_message_id: 10_000 + i
         }
 

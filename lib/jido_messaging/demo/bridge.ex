@@ -323,18 +323,4 @@ defmodule Jido.Messaging.Demo.Bridge do
   defp normalize_module(other),
     do: raise(ArgumentError, "invalid adapter module configuration: #{inspect(other)}")
 
-  # Legacy API - kept for backwards compatibility during migration
-  # These will be removed once Phase 3 is verified working
-
-  @doc deprecated: "Bridge now operates via Signal Bus subscription"
-  def forward_from_telegram(_message, _context) do
-    Logger.debug("[Bridge] forward_from_telegram called but Bridge is now signal-driven")
-    :ok
-  end
-
-  @doc deprecated: "Bridge now operates via Signal Bus subscription"
-  def forward_from_discord(_message, _context) do
-    Logger.debug("[Bridge] forward_from_discord called but Bridge is now signal-driven")
-    :ok
-  end
 end

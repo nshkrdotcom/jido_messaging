@@ -45,6 +45,7 @@ defmodule Jido.Messaging.MsgContext.Normalizer do
       )
 
     command = normalize_command(body, mentions, opts)
+    agent_mentions = normalize_agent_mentions(body, mentions, mention_targets)
 
     emit_command_telemetry(msg_context.channel_type, command)
     emit_mentions_telemetry(msg_context.channel_type, mentions_adapter, mentions, was_mentioned)
@@ -55,6 +56,7 @@ defmodule Jido.Messaging.MsgContext.Normalizer do
         raw: raw,
         mentions: mentions,
         was_mentioned: was_mentioned,
+        agent_mentions: agent_mentions,
         command: command
     }
   end
@@ -218,6 +220,18 @@ defmodule Jido.Messaging.MsgContext.Normalizer do
   end
 
   defp normalize_target(value), do: value |> to_string() |> normalize_target()
+
+  defp normalize_agent_mentions(body, mentions, platform_targets) do
+    stripped_body = strip_leading_mention(body, mentions)
+    platform_target_set = MapSet.new(platform_targets)
+
+    Regex.scan(~r/@([A-Za-z0-9_.-]+)/u, stripped_body, capture: :all_but_first)
+    |> Enum.flat_map(& &1)
+    |> Enum.map(&normalize_target/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&MapSet.member?(platform_target_set, &1))
+    |> Enum.uniq()
+  end
 
   defp resolve_mentions_adapter(%MsgContext{channel_module: channel_module, channel_type: channel_type}) do
     registry_adapter =

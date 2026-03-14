@@ -9,7 +9,7 @@ defmodule Jido.Chat.RoomServerSignalsTest do
   """
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
+  alias Jido.Chat.{Participant, Room}
   alias Jido.Messaging.{RoomServer, RoomSupervisor}
 
   defmodule TestMessaging do
@@ -39,7 +39,7 @@ defmodule Jido.Chat.RoomServerSignalsTest do
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room)
 
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "user_123",
           role: :user,
@@ -76,7 +76,7 @@ defmodule Jido.Chat.RoomServerSignalsTest do
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room)
 
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "sender_abc",
           role: :assistant,
@@ -240,7 +240,7 @@ defmodule Jido.Chat.RoomServerSignalsTest do
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room)
 
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "user_1",
           role: :user,

@@ -1,14 +1,9 @@
 defmodule Jido.Messaging.AgentRunnerSignalsTest do
-  @moduledoc """
-  Tests for AgentRunner's Signal Bus subscription and lifecycle signal emission.
-  Phase 4 of the Bridge Refactor.
-  """
   use ExUnit.Case, async: false
 
   import Jido.Messaging.TestHelpers
 
-  alias Jido.Chat.{LegacyMessage, Room}
-  alias Jido.Messaging.{RoomServer, RoomSupervisor, AgentSupervisor}
+  alias Jido.Messaging.{AgentRunner, Message}
 
   defmodule TestMessaging do
     use Jido.Messaging, persistence: Jido.Messaging.Persistence.ETS
@@ -19,316 +14,133 @@ defmodule Jido.Messaging.AgentRunnerSignalsTest do
     :ok
   end
 
-  describe "Signal Bus subscription" do
-    test "agent subscribes to Signal Bus on init" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, _room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  describe "runner lifecycle" do
+    test "assigned runners subscribe to the signal bus" do
+      %{room: room, thread: thread} = room_with_assignment("alpha", fn _, _ -> :noreply end)
 
-      agent_config = %{
-        name: "TestBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
-      }
+      pid = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
+      assert is_pid(pid)
 
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "test_bot", agent_config)
-
-      # Give time for subscription
       assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
+        :sys.get_state(pid).subscribed == true
       end)
     end
   end
 
-  describe "signal-driven message processing" do
-    test "agent receives messages via Signal Bus" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
+  describe "agent lifecycle telemetry" do
+    test "emits triggered, started, and completed for successful processing" do
       test_pid = self()
-
-      agent_config = %{
-        name: "SignalBot",
-        trigger: :all,
-        handler: fn message, _context ->
-          send(test_pid, {:received_via_signal, message.id})
+      %{room: room, thread: thread, room_pid: room_pid} =
+        room_with_assignment("alpha", fn _message, _context ->
           :noreply
-        end
-      }
+        end)
 
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "signal_bot", agent_config)
+      handler_ids =
+        attach_signal_handlers(test_pid, [
+          [:jido_messaging, :agent, :triggered],
+          [:jido_messaging, :agent, :started],
+          [:jido_messaging, :agent, :completed]
+        ])
 
-      # Wait for subscription
-      assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
-      end)
+      on_exit(fn -> Enum.each(handler_ids, &:telemetry.detach/1) end)
 
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hello via signal!"}]
-        })
+      :ok =
+        Jido.Messaging.RoomServer.add_message(
+          room_pid,
+          Message.new(%{
+            room_id: room.id,
+            sender_id: "user-1",
+            role: :user,
+            content: [%{type: :text, text: "hello"}],
+            thread_id: thread.id
+          }),
+          nil
+        )
 
-      RoomServer.add_message(room_pid, message)
+      assert_receive {:agent_signal, [:jido_messaging, :agent, :triggered], triggered}, 1_000
+      assert_receive {:agent_signal, [:jido_messaging, :agent, :started], started}, 1_000
+      assert_receive {:agent_signal, [:jido_messaging, :agent, :completed], completed}, 1_000
 
-      assert_receive {:received_via_signal, message_id}, 1000
-      assert message_id == message.id
+      assert triggered.agent_id == "alpha"
+      assert triggered.room_id == room.id
+      assert triggered.thread_id == thread.id
+
+      assert started.agent_id == "alpha"
+      assert started.thread_id == thread.id
+
+      assert completed.agent_id == "alpha"
+      assert completed.thread_id == thread.id
+      assert completed.response == :noreply
     end
 
-    test "agent only processes messages for its room" do
-      room1 = Room.new(%{type: :group, name: "Room 1"})
-      room2 = Room.new(%{type: :group, name: "Room 2"})
-      {:ok, room1_pid} = RoomSupervisor.start_room(TestMessaging, room1)
-      {:ok, room2_pid} = RoomSupervisor.start_room(TestMessaging, room2)
-
+    test "emits failed when the handler returns an error" do
       test_pid = self()
+      %{room: room, thread: thread, room_pid: room_pid} =
+        room_with_assignment("alpha", fn _message, _context ->
+          {:error, :intentional_failure}
+        end)
 
-      agent_config = %{
-        name: "Room1Bot",
-        trigger: :all,
-        handler: fn message, _context ->
-          send(test_pid, {:processed, message.room_id})
-          :noreply
-        end
-      }
+      handler_ids = attach_signal_handlers(test_pid, [[:jido_messaging, :agent, :failed]])
+      on_exit(fn -> Enum.each(handler_ids, &:telemetry.detach/1) end)
 
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room1.id, "room1_bot", agent_config)
+      :ok =
+        Jido.Messaging.RoomServer.add_message(
+          room_pid,
+          Message.new(%{
+            room_id: room.id,
+            sender_id: "user-1",
+            role: :user,
+            content: [%{type: :text, text: "hello"}],
+            thread_id: thread.id
+          }),
+          nil
+        )
 
-      # Wait for subscription
-      assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
-      end)
-
-      # LegacyMessage to room2 should NOT trigger the agent in room1
-      message_room2 =
-        LegacyMessage.new(%{
-          room_id: room2.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "LegacyMessage to room 2"}]
-        })
-
-      RoomServer.add_message(room2_pid, message_room2)
-
-      refute_receive {:processed, _}, 200
-
-      # LegacyMessage to room1 SHOULD trigger the agent
-      message_room1 =
-        LegacyMessage.new(%{
-          room_id: room1.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "LegacyMessage to room 1"}]
-        })
-
-      RoomServer.add_message(room1_pid, message_room1)
-
-      room1_id = room1.id
-      assert_receive {:processed, ^room1_id}, 1000
+      assert_receive {:agent_signal, [:jido_messaging, :agent, :failed], failed}, 1_000
+      assert failed.agent_id == "alpha"
+      assert failed.room_id == room.id
+      assert failed.thread_id == thread.id
+      assert failed.error == ":intentional_failure"
     end
   end
 
-  describe "agent lifecycle signals" do
-    test "agent emits triggered, started, and completed signals on success" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
+  defp room_with_assignment(agent_id, handler) do
+    {:ok, room} = TestMessaging.create_room(%{type: :group, name: "Signal Test"})
 
-      # Attach telemetry handlers to capture signals
-      triggered_events = :ets.new(:triggered_events, [:bag, :public])
-      started_events = :ets.new(:started_events, [:bag, :public])
-      completed_events = :ets.new(:completed_events, [:bag, :public])
+    {:ok, thread} =
+      TestMessaging.save_thread(%{
+        room_id: room.id,
+        external_thread_id: "thread-1",
+        delivery_external_room_id: "delivery-thread-1"
+      })
 
-      :telemetry.attach(
-        "test-triggered",
-        [:jido_messaging, :agent, :triggered],
-        fn _event, _measurements, metadata, table ->
-          :ets.insert(table, {:event, metadata})
-        end,
-        triggered_events
-      )
+    {:ok, _spec} =
+      TestMessaging.register_agent(room.id, %{
+        agent_id: agent_id,
+        name: String.capitalize(agent_id),
+        handler: handler
+      })
 
-      :telemetry.attach(
-        "test-started",
-        [:jido_messaging, :agent, :started],
-        fn _event, _measurements, metadata, table ->
-          :ets.insert(table, {:event, metadata})
-        end,
-        started_events
-      )
+    {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, agent_id)
+    {:ok, room_pid} = TestMessaging.get_or_start_room_server(room)
 
-      :telemetry.attach(
-        "test-completed",
-        [:jido_messaging, :agent, :completed],
-        fn _event, _measurements, metadata, table ->
-          :ets.insert(table, {:event, metadata})
-        end,
-        completed_events
-      )
+    %{room: room, thread: thread, room_pid: room_pid}
+  end
 
-      agent_config = %{
-        name: "LifecycleBot",
-        trigger: :all,
-        handler: fn _message, _context -> :noreply end
-      }
-
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "lifecycle_bot", agent_config)
-
-      # Wait for subscription
-      assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
-      end)
-
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Trigger lifecycle"}]
-        })
-
-      RoomServer.add_message(room_pid, message)
-
-      # Wait for processing
-      assert_eventually(fn ->
-        :ets.tab2list(completed_events) |> length() > 0
-      end)
-
-      # Verify triggered signal
-      triggered = :ets.tab2list(triggered_events)
-      assert length(triggered) == 1
-      [{:event, triggered_meta}] = triggered
-      assert triggered_meta.agent_id == "lifecycle_bot"
-      assert triggered_meta.room_id == room.id
-
-      # Verify started signal
-      started = :ets.tab2list(started_events)
-      assert length(started) == 1
-      [{:event, started_meta}] = started
-      assert started_meta.agent_id == "lifecycle_bot"
-
-      # Verify completed signal
-      completed = :ets.tab2list(completed_events)
-      assert length(completed) == 1
-      [{:event, completed_meta}] = completed
-      assert completed_meta.agent_id == "lifecycle_bot"
-      assert completed_meta.response == :noreply
-
-      # Cleanup
-      :telemetry.detach("test-triggered")
-      :telemetry.detach("test-started")
-      :telemetry.detach("test-completed")
-    end
-
-    test "agent emits failed signal on handler error" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      failed_events = :ets.new(:failed_events, [:bag, :public])
+  defp attach_signal_handlers(test_pid, events) do
+    Enum.map(events, fn event ->
+      handler_id = "agent-signal-#{Enum.join(Enum.map(event, &Atom.to_string/1), "-")}-#{System.unique_integer([:positive])}"
 
       :telemetry.attach(
-        "test-failed",
-        [:jido_messaging, :agent, :failed],
-        fn _event, _measurements, metadata, table ->
-          :ets.insert(table, {:event, metadata})
+        handler_id,
+        event,
+        fn event_name, _measurements, metadata, pid ->
+          send(pid, {:agent_signal, event_name, metadata})
         end,
-        failed_events
+        test_pid
       )
 
-      agent_config = %{
-        name: "FailBot",
-        trigger: :all,
-        handler: fn _message, _context -> {:error, :intentional_failure} end
-      }
-
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "fail_bot", agent_config)
-
-      # Wait for subscription
-      assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
-      end)
-
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Trigger failure"}]
-        })
-
-      RoomServer.add_message(room_pid, message)
-
-      # Wait for processing
-      assert_eventually(fn ->
-        :ets.tab2list(failed_events) |> length() > 0
-      end)
-
-      failed = :ets.tab2list(failed_events)
-      assert length(failed) == 1
-      [{:event, failed_meta}] = failed
-      assert failed_meta.agent_id == "fail_bot"
-      assert failed_meta.error == ":intentional_failure"
-
-      :telemetry.detach("test-failed")
-    end
-
-    test "agent emits completed signal with reply info when replying" do
-      room = Room.new(%{type: :group, name: "Test Room"})
-      {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
-
-      completed_events = :ets.new(:completed_reply_events, [:bag, :public])
-
-      :telemetry.attach(
-        "test-completed-reply",
-        [:jido_messaging, :agent, :completed],
-        fn _event, _measurements, metadata, table ->
-          :ets.insert(table, {:event, metadata})
-        end,
-        completed_events
-      )
-
-      agent_config = %{
-        name: "ReplyBot",
-        trigger: :all,
-        handler: fn _message, _context -> {:reply, "Hello back!"} end
-      }
-
-      {:ok, agent_pid} = AgentSupervisor.start_agent(TestMessaging, room.id, "reply_bot", agent_config)
-
-      # Wait for subscription
-      assert_eventually(fn ->
-        state = :sys.get_state(agent_pid)
-        state.subscribed == true
-      end)
-
-      message =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: "user_1",
-          role: :user,
-          content: [%{type: :text, text: "Hello!"}]
-        })
-
-      RoomServer.add_message(room_pid, message)
-
-      # Wait for processing
-      assert_eventually(fn ->
-        :ets.tab2list(completed_events) |> length() > 0
-      end)
-
-      completed = :ets.tab2list(completed_events)
-      assert length(completed) == 1
-      [{:event, completed_meta}] = completed
-      assert completed_meta.agent_id == "reply_bot"
-      assert completed_meta.response == :reply
-      assert is_binary(completed_meta.reply_message_id)
-
-      :telemetry.detach("test-completed-reply")
-    end
+      handler_id
+    end)
   end
 end

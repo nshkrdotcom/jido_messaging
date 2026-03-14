@@ -54,16 +54,16 @@ Pivot `jido_messaging` into a runtime/server package that depends on `jido_chat`
    - `JidoMessaging.Adapters.Threading`
    - channel handlers that transform webhook payloads
 
-## Compatibility wrappers to keep for one migration phase
+## Canonical runtime structs
 1. Domain structs used heavily in runtime APIs:
-   - `JidoMessaging.Message` -> wrap/alias to `Jido.Chat.LegacyMessage`
-   - `JidoMessaging.Room` -> wrap/alias to `Jido.Chat.Room`
-   - `JidoMessaging.Participant` -> wrap/alias to `Jido.Chat.Participant`
-   - `JidoMessaging.MessagingTarget` -> wrap/alias to `Jido.Chat.MessagingTarget`
+   - `JidoMessaging.Message` is the canonical persisted runtime message model
+   - `JidoMessaging.Thread` is the canonical thread routing and assignment model
+   - `JidoMessaging.Context` is the canonical delivery context
+   - `JidoMessaging.Room`, `Participant`, and `MessagingTarget` continue to rely on `Jido.Chat` core types where appropriate
 2. Content wrappers:
-   - `JidoMessaging.Content.*` -> wrappers to `Jido.Chat.Content.*`
+   - `JidoMessaging.Content.*` reuses `Jido.Chat.Content.*`
 3. Capabilities wrapper:
-   - `JidoMessaging.Capabilities` -> thin wrapper around `Jido.Chat.Capabilities` + runtime-specific checks only
+   - `JidoMessaging.Capabilities` remains a thin wrapper around `Jido.Chat.Capabilities` plus runtime-specific checks only
 
 ## New Server-Focused Modules to Add
 1. `JidoMessaging.AdapterBridge`
@@ -87,10 +87,7 @@ Pivot `jido_messaging` into a runtime/server package that depends on `jido_chat`
 3. **Inbound pivot**
    - Update webhook/gateway handlers to produce `Jido.Chat.EventEnvelope`.
    - Route through `Jido.Chat.process_event/4` and then runtime ingest hooks.
-4. **Compatibility shims**
-   - Keep `JidoMessaging.Channel` as deprecated compatibility wrapper delegating to `AdapterBridge`.
-   - Keep `JidoMessaging.Message/Room/Participant/Content` wrappers for one phase.
-5. **Cleanup**
+4. **Cleanup**
    - Remove `JidoMessaging.Channels.*` modules and direct platform tests.
    - Move platform integration tests to `jido_chat_<platform>` packages.
 

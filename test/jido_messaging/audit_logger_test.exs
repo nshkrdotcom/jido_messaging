@@ -135,7 +135,7 @@ defmodule Jido.Messaging.AuditLoggerTest do
               room_id: "room_123",
               participant_id: "user_456",
               is_typing: true,
-              thread_root_id: nil,
+              thread_id: nil,
               correlation_id: "corr_xyz"
             }
           )
@@ -156,7 +156,7 @@ defmodule Jido.Messaging.AuditLoggerTest do
               room_id: "room_123",
               participant_id: "user_456",
               is_typing: true,
-              thread_root_id: nil,
+              thread_id: nil,
               correlation_id: "corr_xyz"
             }
           )

@@ -38,7 +38,17 @@ defmodule Jido.Messaging.RoomSupervisor do
       [room: room, instance_module: instance_module] ++ opts
     }
 
-    DynamicSupervisor.start_child(supervisor, child_spec)
+    case DynamicSupervisor.start_child(supervisor, child_spec) do
+      {:ok, pid} ->
+        Jido.Messaging.restore_room_server_state(instance_module, room.id, pid)
+        {:ok, pid}
+
+      {:error, {:already_started, pid}} ->
+        {:ok, pid}
+
+      other ->
+        other
+    end
   end
 
   @doc """
@@ -49,11 +59,7 @@ defmodule Jido.Messaging.RoomSupervisor do
   def get_or_start_room(instance_module, %Room{} = room, opts \\ []) do
     case RoomServer.whereis(instance_module, room.id) do
       nil ->
-        case start_room(instance_module, room, opts) do
-          {:ok, pid} -> {:ok, pid}
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          error -> error
-        end
+        start_room(instance_module, room, opts)
 
       pid ->
         {:ok, pid}

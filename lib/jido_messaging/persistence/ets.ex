@@ -16,8 +16,10 @@ defmodule Jido.Messaging.Persistence.ETS do
   The adapter state contains table IDs for:
   - `:rooms` - Room records keyed by room_id
   - `:participants` - Participant records keyed by participant_id
+  - `:threads` - Thread records keyed by thread_id
   - `:messages` - Message records keyed by message_id
   - `:room_messages` - Index of message_ids by room_id (bag table)
+  - `:thread_messages` - Index of message_ids by thread_id (bag table)
   - `:room_bindings` - External binding to room_id mapping
   - `:participant_bindings` - External ID to participant_id mapping
   - `:onboarding_flows` - Onboarding flow records keyed by onboarding_id
@@ -31,8 +33,13 @@ defmodule Jido.Messaging.Persistence.ETS do
             %{
               rooms: Zoi.any(),
               participants: Zoi.any(),
+              threads: Zoi.any(),
+              room_threads: Zoi.any(),
+              thread_external_ids: Zoi.any(),
+              thread_roots: Zoi.any(),
               messages: Zoi.any(),
               room_messages: Zoi.any(),
+              thread_messages: Zoi.any(),
               room_bindings: Zoi.any(),
               room_bindings_by_room: Zoi.any(),
               room_bindings_by_id: Zoi.any(),
@@ -53,8 +60,8 @@ defmodule Jido.Messaging.Persistence.ETS do
   @doc "Returns the Zoi schema"
   def schema, do: @schema
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
-  alias Jido.Messaging.RoomBinding
+  alias Jido.Chat.{Participant, Room}
+  alias Jido.Messaging.{Message, RoomBinding, Thread}
 
   @impl true
   def init(_opts) do
@@ -62,8 +69,13 @@ defmodule Jido.Messaging.Persistence.ETS do
       struct!(__MODULE__, %{
         rooms: :ets.new(:rooms, [:set, :public]),
         participants: :ets.new(:participants, [:set, :public]),
+        threads: :ets.new(:threads, [:set, :public]),
+        room_threads: :ets.new(:room_threads, [:bag, :public]),
+        thread_external_ids: :ets.new(:thread_external_ids, [:set, :public]),
+        thread_roots: :ets.new(:thread_roots, [:set, :public]),
         messages: :ets.new(:messages, [:set, :public]),
         room_messages: :ets.new(:room_messages, [:bag, :public]),
+        thread_messages: :ets.new(:thread_messages, [:bag, :public]),
         room_bindings: :ets.new(:room_bindings, [:set, :public]),
         room_bindings_by_room: :ets.new(:room_bindings_by_room, [:bag, :public]),
         room_bindings_by_id: :ets.new(:room_bindings_by_id, [:set, :public]),
@@ -100,6 +112,7 @@ defmodule Jido.Messaging.Persistence.ETS do
     message_ids = :ets.lookup(state.room_messages, room_id) |> Enum.map(&elem(&1, 1))
     Enum.each(message_ids, fn msg_id -> :ets.delete(state.messages, msg_id) end)
     true = :ets.delete(state.room_messages, room_id)
+    delete_threads_for_room(state, room_id)
     :ok
   end
 
@@ -140,16 +153,17 @@ defmodule Jido.Messaging.Persistence.ETS do
   # Message operations
 
   @impl true
-  def save_message(state, %LegacyMessage{} = message) do
+  def save_message(state, %Message{} = message) do
     true = :ets.insert(state.messages, {message.id, message})
     true = :ets.insert(state.room_messages, {message.room_id, message.id})
+    maybe_index_thread_message(state, message)
     index_external_id(state, message)
     {:ok, message}
   end
 
-  defp index_external_id(_state, %LegacyMessage{external_id: nil}), do: :ok
+  defp index_external_id(_state, %Message{external_id: nil}), do: :ok
 
-  defp index_external_id(state, %LegacyMessage{} = message) do
+  defp index_external_id(state, %Message{} = message) do
     channel = get_in(message.metadata, [:channel])
     bridge_id = get_in(message.metadata, [:bridge_id])
 
@@ -172,10 +186,16 @@ defmodule Jido.Messaging.Persistence.ETS do
   @impl true
   def get_messages(state, room_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
+    thread_id = Keyword.get(opts, :thread_id)
 
     message_ids =
-      :ets.lookup(state.room_messages, room_id)
-      |> Enum.map(&elem(&1, 1))
+      if is_binary(thread_id) do
+        :ets.lookup(state.thread_messages, thread_id)
+        |> Enum.map(&elem(&1, 1))
+      else
+        :ets.lookup(state.room_messages, room_id)
+        |> Enum.map(&elem(&1, 1))
+      end
 
     messages =
       message_ids
@@ -186,6 +206,7 @@ defmodule Jido.Messaging.Persistence.ETS do
         end
       end)
       |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
+      |> maybe_filter_thread(thread_id)
       |> Enum.take(limit)
       |> Enum.reverse()
 
@@ -199,11 +220,71 @@ defmodule Jido.Messaging.Persistence.ETS do
         true = :ets.delete(state.messages, message_id)
         # Remove from room_messages index (bag table - need to delete specific object)
         true = :ets.delete_object(state.room_messages, {message.room_id, message_id})
+        maybe_delete_thread_message(state, message)
         :ok
 
       [] ->
         :ok
     end
+  end
+
+  # Thread operations
+
+  @impl true
+  def save_thread(state, %Thread{} = thread) do
+    remove_thread_indexes(state, thread.id)
+    true = :ets.insert(state.threads, {thread.id, thread})
+    true = :ets.insert(state.room_threads, {thread.room_id, thread.id})
+    maybe_index_thread_external_id(state, thread)
+    maybe_index_thread_root(state, thread)
+    {:ok, thread}
+  end
+
+  @impl true
+  def get_thread(state, thread_id) do
+    case :ets.lookup(state.threads, thread_id) do
+      [{^thread_id, thread}] -> {:ok, thread}
+      [] -> {:error, :not_found}
+    end
+  end
+
+  @impl true
+  def get_thread_by_external_id(state, room_id, external_thread_id) do
+    key = {room_id, normalize_term(external_thread_id)}
+
+    case :ets.lookup(state.thread_external_ids, key) do
+      [{^key, thread_id}] -> get_thread(state, thread_id)
+      [] -> {:error, :not_found}
+    end
+  end
+
+  @impl true
+  def get_thread_by_root_message(state, room_id, root_message_id) do
+    key = {room_id, root_message_id}
+
+    case :ets.lookup(state.thread_roots, key) do
+      [{^key, thread_id}] -> get_thread(state, thread_id)
+      [] -> {:error, :not_found}
+    end
+  end
+
+  @impl true
+  def list_threads(state, room_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 100)
+
+    threads =
+      :ets.lookup(state.room_threads, room_id)
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.flat_map(fn thread_id ->
+        case :ets.lookup(state.threads, thread_id) do
+          [{^thread_id, thread}] -> [thread]
+          [] -> []
+        end
+      end)
+      |> Enum.sort_by(& &1.inserted_at, {:asc, DateTime})
+      |> Enum.take(limit)
+
+    {:ok, threads}
   end
 
   # External binding operations
@@ -594,6 +675,89 @@ defmodule Jido.Messaging.Persistence.ETS do
 
   defp binding_key(channel, bridge_id, external_id) do
     {channel, to_string(bridge_id), normalize_term(external_id)}
+  end
+
+  defp maybe_index_thread_message(_state, %Message{thread_id: nil}), do: :ok
+
+  defp maybe_index_thread_message(state, %Message{thread_id: thread_id, id: message_id})
+       when is_binary(thread_id) do
+    true = :ets.insert(state.thread_messages, {thread_id, message_id})
+    :ok
+  end
+
+  defp maybe_delete_thread_message(_state, %Message{thread_id: nil}), do: :ok
+
+  defp maybe_delete_thread_message(state, %Message{thread_id: thread_id, id: message_id})
+       when is_binary(thread_id) do
+    true = :ets.delete_object(state.thread_messages, {thread_id, message_id})
+    :ok
+  end
+
+  defp maybe_filter_thread(messages, nil), do: messages
+  defp maybe_filter_thread(messages, thread_id), do: Enum.filter(messages, &(&1.thread_id == thread_id))
+
+  defp maybe_index_thread_external_id(_state, %Thread{external_thread_id: nil}), do: :ok
+
+  defp maybe_index_thread_external_id(
+         state,
+         %Thread{room_id: room_id, external_thread_id: external_thread_id, id: thread_id}
+       ) do
+    true =
+      :ets.insert(
+        state.thread_external_ids,
+        {{room_id, normalize_term(external_thread_id)}, thread_id}
+      )
+
+    :ok
+  end
+
+  defp maybe_index_thread_root(_state, %Thread{root_message_id: nil}), do: :ok
+
+  defp maybe_index_thread_root(
+         state,
+         %Thread{room_id: room_id, root_message_id: root_message_id, id: thread_id}
+       ) do
+    true = :ets.insert(state.thread_roots, {{room_id, root_message_id}, thread_id})
+    :ok
+  end
+
+  defp remove_thread_indexes(state, thread_id) do
+    case :ets.lookup(state.threads, thread_id) do
+      [{^thread_id, existing_thread}] ->
+        true = :ets.delete_object(state.room_threads, {existing_thread.room_id, thread_id})
+
+        if is_binary(existing_thread.external_thread_id) do
+          true =
+            :ets.delete_object(
+              state.thread_external_ids,
+              {{existing_thread.room_id, normalize_term(existing_thread.external_thread_id)}, thread_id}
+            )
+        end
+
+        if is_binary(existing_thread.root_message_id) do
+          true =
+            :ets.delete_object(
+              state.thread_roots,
+              {{existing_thread.room_id, existing_thread.root_message_id}, thread_id}
+            )
+        end
+
+      [] ->
+        :ok
+    end
+  end
+
+  defp delete_threads_for_room(state, room_id) do
+    :ets.lookup(state.room_threads, room_id)
+    |> Enum.map(&elem(&1, 1))
+    |> Enum.each(fn thread_id ->
+      remove_thread_indexes(state, thread_id)
+      true = :ets.delete(state.threads, thread_id)
+      true = :ets.delete(state.thread_messages, thread_id)
+    end)
+
+    true = :ets.delete(state.room_threads, room_id)
+    :ok
   end
 
   defp normalize_term(value) when is_binary(value), do: value

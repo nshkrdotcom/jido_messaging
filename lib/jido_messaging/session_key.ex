@@ -36,22 +36,23 @@ defmodule Jido.Messaging.SessionKey do
   Derives a session key from a MsgContext.
 
   Uses `room_id` if resolved (internal UUID), otherwise falls back to `external_room_id`.
-  Thread scoping uses `thread_root_id` if present.
+  Thread scoping uses resolved `thread_id` when present and otherwise falls back to
+  `external_thread_id`.
 
   ## Examples
 
-      iex> ctx = %MsgContext{channel_type: :telegram, bridge_id: "bot_1", external_room_id: "123", room_id: nil, thread_root_id: nil}
+      iex> ctx = %MsgContext{channel_type: :telegram, bridge_id: "bot_1", external_room_id: "123", room_id: nil, thread_id: nil}
       iex> SessionKey.from_context(ctx)
       {:telegram, "bot_1", "123", nil}
 
-      iex> ctx = %MsgContext{channel_type: :discord, bridge_id: "guild_1", external_room_id: "ch_1", room_id: "uuid-123", thread_root_id: "thread_456"}
+      iex> ctx = %MsgContext{channel_type: :discord, bridge_id: "guild_1", external_room_id: "ch_1", room_id: "uuid-123", thread_id: "thread_456"}
       iex> SessionKey.from_context(ctx)
       {:discord, "guild_1", "uuid-123", "thread_456"}
   """
   @spec from_context(MsgContext.t()) :: t()
   def from_context(%MsgContext{} = ctx) do
     room_id = ctx.room_id || ctx.external_room_id
-    {ctx.channel_type, ctx.bridge_id, room_id, ctx.thread_root_id}
+    {ctx.channel_type, ctx.bridge_id, room_id, ctx.thread_id || ctx.external_thread_id}
   end
 
   @doc """

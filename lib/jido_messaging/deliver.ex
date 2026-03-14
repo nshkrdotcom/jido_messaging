@@ -20,19 +20,19 @@ defmodule Jido.Messaging.Deliver do
 
   require Logger
 
-  alias Jido.Chat.{Capabilities, LegacyMessage}
+  alias Jido.Chat.Capabilities
   alias Jido.Chat.Content.Text
-  alias Jido.Messaging.{MediaPolicy, OutboundGateway, OutboundRouter, RoomServer, Signal}
+  alias Jido.Messaging.{Context, MediaPolicy, Message, OutboundGateway, OutboundRouter, RoomServer, Signal}
 
-  @type context :: Jido.Messaging.Ingest.context()
+  @type context :: Context.t() | map()
 
   @doc """
   Deliver an outgoing message as a reply.
 
   Creates an assistant message, sends it via the channel, and updates the message status.
   """
-  @spec deliver_outgoing(module(), LegacyMessage.t(), String.t(), context(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+  @spec deliver_outgoing(module(), Message.t(), String.t(), context(), keyword()) ::
+          {:ok, Message.t()} | {:error, term()}
   def deliver_outgoing(messaging_module, original_message, text, context, opts \\ []) do
     channel = context.channel
     channel_type = Jido.Messaging.AdapterBridge.channel_type(channel)
@@ -46,17 +46,31 @@ defmodule Jido.Messaging.Deliver do
 
     message_attrs = %{
       room_id: original_message.room_id,
-      sender_id: "system",
+      sender_id: Keyword.get(opts, :sender_id, "system"),
       role: :assistant,
       content: filtered_content,
       reply_to_id: original_message.id,
+      thread_id: original_message.thread_id,
+      external_thread_id: context[:external_thread_id] || original_message.external_thread_id,
+      delivery_external_room_id:
+        context[:delivery_external_room_id] || original_message.delivery_external_room_id,
       status: :sending,
-      metadata: %{channel: channel_type, bridge_id: bridge_id}
+      metadata:
+        %{
+          channel: channel_type,
+          bridge_id: bridge_id
+        }
+        |> maybe_put(:agent_name, Keyword.get(opts, :sender_name))
     }
 
     gateway_opts =
       opts
       |> maybe_put_opt(:reply_to_id, external_reply_to_id)
+      |> maybe_put_opt(:external_thread_id, context[:external_thread_id] || original_message.external_thread_id)
+      |> maybe_put_opt(
+        :delivery_external_room_id,
+        context[:delivery_external_room_id] || original_message.delivery_external_room_id
+      )
 
     with {:ok, message} <- messaging_module.save_message(message_attrs) do
       request_opts = Keyword.put_new(gateway_opts, :idempotency_key, message.id)
@@ -77,7 +91,7 @@ defmodule Jido.Messaging.Deliver do
 
           {:ok, persisted_message} = messaging_module.save_message_struct(updated_message)
 
-          add_to_room_server(messaging_module, original_message.room_id, persisted_message)
+          add_to_room_server(messaging_module, original_message.room_id, persisted_message, context)
 
           Logger.debug(
             "[Jido.Messaging.Deliver] Message #{message.id} sent to room #{original_message.room_id} via partition #{send_result.partition}"
@@ -104,8 +118,8 @@ defmodule Jido.Messaging.Deliver do
   @doc """
   Deliver an outgoing media payload as a reply.
   """
-  @spec deliver_media_outgoing(module(), LegacyMessage.t(), map(), context(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+  @spec deliver_media_outgoing(module(), Message.t(), map(), context(), keyword()) ::
+          {:ok, Message.t()} | {:error, term()}
   def deliver_media_outgoing(messaging_module, original_message, media_payload, context, opts \\ [])
       when is_map(media_payload) do
     channel = context.channel
@@ -117,10 +131,14 @@ defmodule Jido.Messaging.Deliver do
          {:ok, message} <-
            messaging_module.save_message(%{
              room_id: original_message.room_id,
-             sender_id: "system",
+             sender_id: Keyword.get(opts, :sender_id, "system"),
              role: :assistant,
              content: media_content,
              reply_to_id: original_message.id,
+             thread_id: original_message.thread_id,
+             external_thread_id: context[:external_thread_id] || original_message.external_thread_id,
+             delivery_external_room_id:
+               context[:delivery_external_room_id] || original_message.delivery_external_room_id,
              status: :sending,
              metadata: %{
                channel: channel_type,
@@ -131,6 +149,11 @@ defmodule Jido.Messaging.Deliver do
       request_opts =
         opts
         |> maybe_put_opt(:reply_to_id, external_reply_to_id)
+        |> maybe_put_opt(:external_thread_id, context[:external_thread_id] || original_message.external_thread_id)
+        |> maybe_put_opt(
+          :delivery_external_room_id,
+          context[:delivery_external_room_id] || original_message.delivery_external_room_id
+        )
         |> Keyword.put_new(:idempotency_key, message.id)
 
       case OutboundGateway.send_media(messaging_module, context, media_payload, request_opts) do
@@ -148,7 +171,7 @@ defmodule Jido.Messaging.Deliver do
           }
 
           {:ok, persisted_message} = messaging_module.save_message_struct(updated_message)
-          add_to_room_server(messaging_module, original_message.room_id, persisted_message)
+          add_to_room_server(messaging_module, original_message.room_id, persisted_message, context)
           Signal.emit_sent(persisted_message, context)
           {:ok, persisted_message}
 
@@ -173,7 +196,7 @@ defmodule Jido.Messaging.Deliver do
   Send a proactive message to a room using bridge-configured routing.
   """
   @spec send_to_room(module(), String.t(), String.t(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+          {:ok, Message.t()} | {:error, term()}
   def send_to_room(messaging_module, room_id, text, opts \\ [])
       when is_atom(messaging_module) and is_binary(room_id) and is_binary(text) and is_list(opts) do
     send_to_room_via_routes(messaging_module, room_id, text, opts)
@@ -186,7 +209,7 @@ defmodule Jido.Messaging.Deliver do
   and dispatches through `Jido.Messaging.OutboundRouter`.
   """
   @spec send_to_room_via_routes(module(), String.t(), String.t(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+          {:ok, Message.t()} | {:error, term()}
   def send_to_room_via_routes(messaging_module, room_id, text, opts \\ [])
       when is_atom(messaging_module) and is_binary(room_id) and is_binary(text) and is_list(opts) do
     message_attrs = %{
@@ -220,7 +243,7 @@ defmodule Jido.Messaging.Deliver do
           }
 
           {:ok, persisted_message} = messaging_module.save_message_struct(updated_message)
-          add_to_room_server(messaging_module, room_id, persisted_message)
+          add_to_room_server(messaging_module, room_id, persisted_message, %{room_id: room_id, instance_module: messaging_module})
           Signal.emit_sent(persisted_message, %{room_id: room_id, instance_module: messaging_module})
           {:ok, persisted_message}
 
@@ -245,11 +268,11 @@ defmodule Jido.Messaging.Deliver do
   @doc """
   Edit a previously-sent message through the outbound gateway.
   """
-  @spec edit_outgoing(module(), LegacyMessage.t(), String.t(), context() | map(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+  @spec edit_outgoing(module(), Message.t(), String.t(), context() | map(), keyword()) ::
+          {:ok, Message.t()} | {:error, term()}
   def edit_outgoing(messaging_module, message, text, context, opts \\ [])
 
-  def edit_outgoing(_messaging_module, %LegacyMessage{external_id: nil}, _text, _context, _opts) do
+  def edit_outgoing(_messaging_module, %Message{external_id: nil}, _text, _context, _opts) do
     {:error, :missing_external_message_id}
   end
 
@@ -288,11 +311,11 @@ defmodule Jido.Messaging.Deliver do
   @doc """
   Edit a previously-sent media message through the outbound gateway.
   """
-  @spec edit_outgoing_media(module(), LegacyMessage.t(), map(), context() | map(), keyword()) ::
-          {:ok, LegacyMessage.t()} | {:error, term()}
+  @spec edit_outgoing_media(module(), Message.t(), map(), context() | map(), keyword()) ::
+          {:ok, Message.t()} | {:error, term()}
   def edit_outgoing_media(messaging_module, message, media_payload, context, opts \\ [])
 
-  def edit_outgoing_media(_messaging_module, %LegacyMessage{external_id: nil}, _media_payload, _context, _opts) do
+  def edit_outgoing_media(_messaging_module, %Message{external_id: nil}, _media_payload, _context, _opts) do
     {:error, :missing_external_message_id}
   end
 
@@ -327,13 +350,13 @@ defmodule Jido.Messaging.Deliver do
     end
   end
 
-  defp add_to_room_server(messaging_module, room_id, message) do
+  defp add_to_room_server(messaging_module, room_id, message, context) do
     case RoomServer.whereis(messaging_module, room_id) do
       nil ->
         Logger.debug("[Jido.Messaging.Deliver] Room server not running for #{room_id}, skipping")
 
       pid ->
-        RoomServer.add_message(pid, message)
+        RoomServer.add_message(pid, message, context)
     end
   end
 

@@ -11,7 +11,14 @@ defmodule Jido.Messaging.AgentSupervisor do
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    DynamicSupervisor.start_link(__MODULE__, opts, name: name)
+    case DynamicSupervisor.start_link(__MODULE__, opts, name: name) do
+      {:ok, _pid} = ok ->
+        maybe_restore_assigned_runners(Keyword.get(opts, :instance_module))
+        ok
+
+      other ->
+        other
+    end
   end
 
   @impl true
@@ -20,7 +27,7 @@ defmodule Jido.Messaging.AgentSupervisor do
   end
 
   @doc """
-  Start an agent in a room.
+  Start an agent assigned to a room thread.
 
   Returns `{:ok, pid}` if started successfully, or `{:error, {:already_started, pid}}`
   if the agent is already running in this room.
@@ -32,44 +39,85 @@ defmodule Jido.Messaging.AgentSupervisor do
   - `:trigger` - `:all` | `:mention` | `{:prefix, "/cmd"}`
   - `:name` - Display name for the agent
   """
-  def start_agent(instance_module, room_id, agent_id, agent_config) do
+  def start_agent(instance_module, room_id, thread_id, agent_id, agent_config) do
     supervisor = Module.concat(instance_module, AgentSupervisor)
 
     child_spec = {
       AgentRunner,
-      room_id: room_id, agent_id: agent_id, agent_config: agent_config, instance_module: instance_module
+      [
+        room_id: room_id,
+        thread_id: thread_id,
+        agent_id: agent_id,
+        agent_config: agent_config,
+        instance_module: instance_module
+      ]
     }
 
-    DynamicSupervisor.start_child(supervisor, child_spec)
+    try do
+      case DynamicSupervisor.start_child(supervisor, child_spec) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        {:error, {:already_started, pid}} ->
+          {:ok, pid}
+
+        {:error, :already_present} ->
+          case AgentRunner.whereis(instance_module, room_id, thread_id, agent_id) do
+            pid when is_pid(pid) -> {:ok, pid}
+            nil -> {:error, :runner_unavailable}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    catch
+      :exit, reason ->
+        {:error, {:supervisor_unavailable, reason}}
+    end
   end
 
   @doc """
-  Stop an agent in a room.
+  Stop an agent assigned to a room thread.
 
   Returns `:ok` if stopped, or `{:error, :not_found}` if not running.
   """
-  def stop_agent(instance_module, room_id, agent_id) do
-    case AgentRunner.whereis(instance_module, room_id, agent_id) do
+  def stop_agent(instance_module, room_id, thread_id, agent_id) do
+    case AgentRunner.whereis(instance_module, room_id, thread_id, agent_id) do
       nil ->
         {:error, :not_found}
 
       pid ->
         supervisor = Module.concat(instance_module, AgentSupervisor)
-        DynamicSupervisor.terminate_child(supervisor, pid)
+        ref = Process.monitor(pid)
+
+        try do
+          case DynamicSupervisor.terminate_child(supervisor, pid) do
+            :ok ->
+              await_agent_stop(pid, ref)
+
+            {:error, _reason} = error ->
+              Process.demonitor(ref, [:flush])
+              error
+          end
+        catch
+          :exit, reason ->
+            Process.demonitor(ref, [:flush])
+            {:error, {:supervisor_unavailable, reason}}
+        end
     end
   end
 
   @doc """
-  List all agents in a room.
+  List all running agents in a room.
 
-  Returns a list of `{agent_id, pid}` tuples.
+  Returns a list of `{{thread_id, agent_id}, pid}` tuples.
   """
   def list_agents(instance_module, room_id) do
-    registry = Module.concat(instance_module, Registry.Agents)
-
-    Registry.select(registry, [
-      {{{:"$1", :"$2"}, :"$3", :_}, [{:==, :"$1", room_id}], [{{:"$2", :"$3"}}]}
-    ])
+    list_all_agents(instance_module)
+    |> Enum.flat_map(fn
+      {^room_id, thread_id, agent_id, pid} -> [{{thread_id, agent_id}, pid}]
+      {_other_room_id, _thread_id, _agent_id, _pid} -> []
+    end)
   end
 
   @doc "Count running agent runners for this instance"
@@ -86,10 +134,46 @@ defmodule Jido.Messaging.AgentSupervisor do
     DynamicSupervisor.which_children(supervisor)
     |> Enum.map(fn {_, pid, _, _} ->
       case Registry.keys(registry, pid) do
-        [{room_id, agent_id}] -> {room_id, agent_id, pid}
+        [{room_id, thread_id, agent_id}] -> {room_id, thread_id, agent_id, pid}
         _ -> nil
       end
     end)
     |> Enum.reject(&is_nil/1)
+  end
+
+  defp await_agent_stop(pid, ref, timeout_ms \\ 1_000) do
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        :ok
+    after
+      timeout_ms ->
+        Process.demonitor(ref, [:flush])
+
+        if Process.alive?(pid) do
+          {:error, :stop_timeout}
+        else
+          :ok
+        end
+    end
+  end
+
+  defp maybe_restore_assigned_runners(instance_module) when is_atom(instance_module) do
+    Task.start(fn -> retry_restore_assigned_runners(instance_module, 5) end)
+    :ok
+  end
+
+  defp maybe_restore_assigned_runners(_instance_module), do: :ok
+
+  defp retry_restore_assigned_runners(_instance_module, 0), do: :ok
+
+  defp retry_restore_assigned_runners(instance_module, attempts_left) do
+    case Jido.Messaging.restore_agent_runners(instance_module) do
+      :ok ->
+        :ok
+
+      {:error, :runtime_unavailable} ->
+        Process.sleep(50)
+        retry_restore_assigned_runners(instance_module, attempts_left - 1)
+    end
   end
 end

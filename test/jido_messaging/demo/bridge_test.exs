@@ -10,7 +10,7 @@ defmodule Jido.Messaging.Demo.BridgeTest do
   """
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.{LegacyMessage, Room}
+  alias Jido.Chat.Room
   alias Jido.Messaging.{RoomServer, RoomSupervisor}
   alias Jido.Messaging.Demo.Bridge
 
@@ -194,7 +194,7 @@ defmodule Jido.Messaging.Demo.BridgeTest do
       {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
 
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "user_abc",
           role: :user,
@@ -226,9 +226,9 @@ defmodule Jido.Messaging.Demo.BridgeTest do
       room = Room.new(%{type: :group, name: "Loop Test Room"})
       {:ok, room_pid} = RoomSupervisor.start_room(TestMessaging, room)
 
-      # LegacyMessage from Telegram - should NOT forward back to Telegram
+      # Message from Telegram - should NOT forward back to Telegram
       tg_message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "tg_user",
           role: :user,
@@ -242,9 +242,9 @@ defmodule Jido.Messaging.Demo.BridgeTest do
       :ok = RoomServer.add_message(room_pid, tg_message)
       Process.sleep(50)
 
-      # LegacyMessage from Discord - should NOT forward back to Discord
+      # Message from Discord - should NOT forward back to Discord
       dc_message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "dc_user",
           role: :user,
@@ -260,21 +260,4 @@ defmodule Jido.Messaging.Demo.BridgeTest do
     end
   end
 
-  describe "Legacy API deprecation" do
-    test "forward_from_telegram returns :ok but does nothing" do
-      {:ok, _pid} =
-        start_supervised({Bridge, bridge_opts(telegram_chat_id: "legacy_tg", discord_channel_id: "legacy_dc")})
-
-      # Legacy call should not crash
-      assert :ok = Bridge.forward_from_telegram(%{}, %{})
-    end
-
-    test "forward_from_discord returns :ok but does nothing" do
-      {:ok, _pid} =
-        start_supervised({Bridge, bridge_opts(telegram_chat_id: "legacy_tg", discord_channel_id: "legacy_dc")})
-
-      # Legacy call should not crash
-      assert :ok = Bridge.forward_from_discord(%{}, %{})
-    end
-  end
 end

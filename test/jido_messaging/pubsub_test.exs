@@ -1,7 +1,7 @@
 defmodule Jido.Messaging.PubSubTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
+  alias Jido.Chat.{Participant, Room}
   alias Jido.Messaging.{PubSub, RoomServer}
 
   @moduletag :pubsub
@@ -87,7 +87,7 @@ defmodule Jido.Messaging.PubSubTest do
         :ok = PubSub.subscribe(Jido.Messaging.TestMessagingWithPubSub, room.id)
 
         message =
-          LegacyMessage.new(%{
+          Jido.Messaging.Message.new(%{
             room_id: room.id,
             sender_id: "user_1",
             role: :user,

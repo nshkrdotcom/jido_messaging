@@ -183,7 +183,7 @@ defmodule Jido.Messaging.SessionManagerTest do
     Process.sleep(260)
 
     assert {:ok, stale_result} = OutboundGateway.send_message(TestMessaging, fresh_context, "stale-route")
-    assert stale_result.message_id == "fallback-room:stale-route"
+    assert stale_result.message_id == "primary-room:stale-route"
     assert stale_result.route_resolution.source == :provided_fallback
     assert stale_result.route_resolution.fallback
     assert stale_result.route_resolution.stale

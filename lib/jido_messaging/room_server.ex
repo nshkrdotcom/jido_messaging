@@ -12,7 +12,8 @@ defmodule Jido.Messaging.RoomServer do
   use GenServer
   require Logger
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
+  alias Jido.Chat.{Participant, Room}
+  alias Jido.Messaging.Message
 
   @default_message_limit 100
   @default_timeout_ms :timer.minutes(5)
@@ -24,8 +25,10 @@ defmodule Jido.Messaging.RoomServer do
             %{
               room: Zoi.struct(Room),
               instance_module: Zoi.any(),
-              messages: Zoi.array(Zoi.struct(LegacyMessage)) |> Zoi.default([]),
+              messages: Zoi.array(Zoi.struct(Message)) |> Zoi.default([]),
               participants: Zoi.map() |> Zoi.default(%{}),
+              registered_agents: Zoi.map() |> Zoi.default(%{}),
+              thread_assignments: Zoi.map() |> Zoi.default(%{}),
               typing: Zoi.map() |> Zoi.default(%{}),
               message_limit: Zoi.integer() |> Zoi.default(@default_message_limit),
               timeout_ms: Zoi.integer() |> Zoi.default(@default_timeout_ms),
@@ -77,8 +80,8 @@ defmodule Jido.Messaging.RoomServer do
   end
 
   @doc "Add a message to the room's history"
-  def add_message(server, %LegacyMessage{} = message) do
-    GenServer.call(server, {:add_message, message})
+  def add_message(server, %Message{} = message, context \\ nil) do
+    GenServer.call(server, {:add_message, message, context})
   end
 
   @doc "Add or update a participant in the room"
@@ -113,8 +116,8 @@ defmodule Jido.Messaging.RoomServer do
 
   @doc "Set typing status for a participant"
   def set_typing(server, participant_id, is_typing, opts \\ []) do
-    thread_root_id = Keyword.get(opts, :thread_root_id)
-    GenServer.call(server, {:set_typing, participant_id, is_typing, thread_root_id})
+    thread_id = Keyword.get(opts, :thread_id)
+    GenServer.call(server, {:set_typing, participant_id, is_typing, thread_id})
   end
 
   @doc "Get currently typing participants"
@@ -142,19 +145,44 @@ defmodule Jido.Messaging.RoomServer do
     GenServer.call(server, {:mark_read, message_id, participant_id})
   end
 
-  @doc "Create a thread from a message"
-  def create_thread(server, root_message_id) do
-    GenServer.call(server, {:create_thread, root_message_id})
+  @doc "Register an agent with the room"
+  def register_agent(server, agent_spec) when is_map(agent_spec) do
+    GenServer.call(server, {:register_agent, agent_spec})
   end
 
-  @doc "Add a reply to a thread"
-  def add_thread_reply(server, root_message_id, %LegacyMessage{} = reply) do
-    GenServer.call(server, {:add_thread_reply, root_message_id, reply})
+  @doc "Unregister an agent from the room"
+  def unregister_agent(server, agent_id) when is_binary(agent_id) do
+    GenServer.call(server, {:unregister_agent, agent_id})
   end
 
-  @doc "Get messages in a thread"
-  def get_thread_messages(server, root_message_id, opts \\ []) do
-    GenServer.call(server, {:get_thread_messages, root_message_id, opts})
+  @doc "List registered agents"
+  def list_agents(server) do
+    GenServer.call(server, :list_agents)
+  end
+
+  @doc "Fetch one registered agent"
+  def get_agent(server, agent_id) when is_binary(agent_id) do
+    GenServer.call(server, {:get_agent, agent_id})
+  end
+
+  @doc "Assign a thread to an agent"
+  def assign_thread(server, thread_id, agent_id) when is_binary(thread_id) and is_binary(agent_id) do
+    GenServer.call(server, {:assign_thread, thread_id, agent_id})
+  end
+
+  @doc "Unassign a thread"
+  def unassign_thread(server, thread_id) when is_binary(thread_id) do
+    GenServer.call(server, {:unassign_thread, thread_id})
+  end
+
+  @doc "Get thread assignment"
+  def thread_assignment(server, thread_id) when is_binary(thread_id) do
+    GenServer.call(server, {:thread_assignment, thread_id})
+  end
+
+  @doc "List thread assignments"
+  def list_thread_assignments(server) do
+    GenServer.call(server, :list_thread_assignments)
   end
 
   @doc "Check if a room server is running"
@@ -170,7 +198,7 @@ defmodule Jido.Messaging.RoomServer do
   @doc "Get list of agent PIDs participating in a room"
   def get_agent_pids(instance_module, room_id) do
     Jido.Messaging.AgentSupervisor.list_agents(instance_module, room_id)
-    |> Enum.map(fn {_agent_id, pid} -> pid end)
+    |> Enum.map(fn {_assignment, pid} -> pid end)
   end
 
   # GenServer callbacks
@@ -202,7 +230,7 @@ defmodule Jido.Messaging.RoomServer do
   end
 
   @impl true
-  def handle_call({:add_message, message}, _from, state) do
+  def handle_call({:add_message, message, context}, _from, state) do
     messages = [message | state.messages] |> Enum.take(state.message_limit)
     new_state = %{state | messages: messages}
 
@@ -210,7 +238,9 @@ defmodule Jido.Messaging.RoomServer do
     emit_signal(:message_added, state, %{
       room_id: state.room.id,
       message: message,
-      sender_id: message.sender_id
+      sender_id: message.sender_id,
+      thread_id: message.thread_id,
+      context: context
     })
 
     # Phase 6: PubSub removed from critical path - use Signal Bus subscription instead
@@ -254,13 +284,14 @@ defmodule Jido.Messaging.RoomServer do
   @impl true
   def handle_call({:get_messages, opts}, _from, state) do
     limit = Keyword.get(opts, :limit)
+    thread_id = Keyword.get(opts, :thread_id)
 
     messages =
-      if limit do
-        Enum.take(state.messages, limit)
-      else
-        state.messages
-      end
+      state.messages
+      |> maybe_filter_messages_by_thread(thread_id)
+      |> then(fn filtered ->
+        if limit, do: Enum.take(filtered, limit), else: filtered
+      end)
 
     {:reply, messages, state, state.timeout_ms}
   end
@@ -301,24 +332,80 @@ defmodule Jido.Messaging.RoomServer do
   end
 
   @impl true
-  def handle_call({:set_typing, participant_id, is_typing, thread_root_id}, _from, state) do
-    typing_key = {participant_id, thread_root_id}
+  def handle_call({:register_agent, agent_spec}, _from, state) do
+    agent_id = Map.fetch!(agent_spec, :agent_id)
+    registered_agents = Map.put(state.registered_agents, agent_id, agent_spec)
+    {:reply, {:ok, agent_spec}, %{state | registered_agents: registered_agents}, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call({:unregister_agent, agent_id}, _from, state) do
+    registered_agents = Map.delete(state.registered_agents, agent_id)
+    thread_assignments =
+      state.thread_assignments
+      |> Enum.reject(fn {_thread_id, assigned_agent_id} -> assigned_agent_id == agent_id end)
+      |> Map.new()
+
+    {:reply, :ok, %{state | registered_agents: registered_agents, thread_assignments: thread_assignments}, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call(:list_agents, _from, state) do
+    {:reply, Map.values(state.registered_agents), state, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call({:get_agent, agent_id}, _from, state) do
+    case Map.fetch(state.registered_agents, agent_id) do
+      {:ok, agent_spec} -> {:reply, {:ok, agent_spec}, state, state.timeout_ms}
+      :error -> {:reply, {:error, :not_found}, state, state.timeout_ms}
+    end
+  end
+
+  @impl true
+  def handle_call({:assign_thread, thread_id, agent_id}, _from, state) do
+    if Map.has_key?(state.registered_agents, agent_id) do
+      thread_assignments = Map.put(state.thread_assignments, thread_id, agent_id)
+      {:reply, :ok, %{state | thread_assignments: thread_assignments}, state.timeout_ms}
+    else
+      {:reply, {:error, :unknown_agent}, state, state.timeout_ms}
+    end
+  end
+
+  @impl true
+  def handle_call({:unassign_thread, thread_id}, _from, state) do
+    {:reply, :ok, %{state | thread_assignments: Map.delete(state.thread_assignments, thread_id)}, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call({:thread_assignment, thread_id}, _from, state) do
+    {:reply, Map.get(state.thread_assignments, thread_id), state, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call(:list_thread_assignments, _from, state) do
+    {:reply, state.thread_assignments, state, state.timeout_ms}
+  end
+
+  @impl true
+  def handle_call({:set_typing, participant_id, is_typing, thread_id}, _from, state) do
+    typing_key = {participant_id, thread_id}
 
     {new_typing, event} =
       if is_typing do
         expires_at = DateTime.add(DateTime.utc_now(), state.typing_timeout_ms, :millisecond)
-        Process.send_after(self(), {:typing_timeout, participant_id, thread_root_id}, state.typing_timeout_ms)
+        Process.send_after(self(), {:typing_timeout, participant_id, thread_id}, state.typing_timeout_ms)
 
         {Map.put(state.typing, typing_key, expires_at),
-         {:typing_started, %{participant_id: participant_id, thread_root_id: thread_root_id}}}
+         {:typing_started, %{participant_id: participant_id, thread_id: thread_id}}}
       else
         {Map.delete(state.typing, typing_key),
-         {:typing_stopped, %{participant_id: participant_id, thread_root_id: thread_root_id}}}
+         {:typing_stopped, %{participant_id: participant_id, thread_id: thread_id}}}
       end
 
     new_state = %{state | typing: new_typing}
     broadcast_event(state.instance_module, state.room.id, event)
-    emit_signal(:typing, state, %{participant_id: participant_id, is_typing: is_typing, thread_root_id: thread_root_id})
+    emit_signal(:typing, state, %{participant_id: participant_id, is_typing: is_typing, thread_id: thread_id})
 
     {:reply, :ok, new_state, state.timeout_ms}
   end
@@ -330,8 +417,8 @@ defmodule Jido.Messaging.RoomServer do
     active_typing =
       state.typing
       |> Enum.filter(fn {_key, expires_at} -> DateTime.compare(expires_at, now) == :gt end)
-      |> Enum.map(fn {{participant_id, thread_root_id}, _} ->
-        %{participant_id: participant_id, thread_root_id: thread_root_id}
+      |> Enum.map(fn {{participant_id, thread_id}, _} ->
+        %{participant_id: participant_id, thread_id: thread_id}
       end)
 
     {:reply, active_typing, state, state.timeout_ms}
@@ -516,10 +603,10 @@ defmodule Jido.Messaging.RoomServer do
   @impl true
   def handle_call({:create_thread, root_message_id}, _from, state) do
     case update_message(state, root_message_id, fn msg ->
-           if msg.thread_root_id do
+           if msg.thread_id do
              {:unchanged, msg}
            else
-             {:ok, %{msg | thread_root_id: msg.id}}
+             {:ok, %{msg | thread_id: msg.id}}
            end
          end) do
       {:ok, updated_msg, new_state} ->
@@ -537,10 +624,10 @@ defmodule Jido.Messaging.RoomServer do
 
   @impl true
   def handle_call({:add_thread_reply, root_message_id, reply}, _from, state) do
-    root_exists = Enum.any?(state.messages, &(&1.id == root_message_id && &1.thread_root_id == root_message_id))
+    root_exists = Enum.any?(state.messages, &(&1.id == root_message_id && &1.thread_id == root_message_id))
 
     if root_exists do
-      reply_with_thread = %{reply | thread_root_id: root_message_id}
+      reply_with_thread = %{reply | thread_id: root_message_id}
       messages = [reply_with_thread | state.messages] |> Enum.take(state.message_limit)
       new_state = %{state | messages: messages}
 
@@ -575,15 +662,15 @@ defmodule Jido.Messaging.RoomServer do
 
     thread_messages =
       state.messages
-      |> Enum.filter(&(&1.thread_root_id == root_message_id))
+      |> Enum.filter(&(&1.thread_id == root_message_id))
       |> then(fn msgs -> if limit, do: Enum.take(msgs, limit), else: msgs end)
 
     {:reply, thread_messages, state, state.timeout_ms}
   end
 
   @impl true
-  def handle_info({:typing_timeout, participant_id, thread_root_id}, state) do
-    typing_key = {participant_id, thread_root_id}
+  def handle_info({:typing_timeout, participant_id, thread_id}, state) do
+    typing_key = {participant_id, thread_id}
     now = DateTime.utc_now()
 
     case Map.get(state.typing, typing_key) do
@@ -598,7 +685,7 @@ defmodule Jido.Messaging.RoomServer do
           broadcast_event(
             state.instance_module,
             state.room.id,
-            {:typing_stopped, %{participant_id: participant_id, thread_root_id: thread_root_id}}
+            {:typing_stopped, %{participant_id: participant_id, thread_id: thread_id}}
           )
 
           {:noreply, new_state, state.timeout_ms}
@@ -638,6 +725,9 @@ defmodule Jido.Messaging.RoomServer do
         end
     end
   end
+
+  defp maybe_filter_messages_by_thread(messages, nil), do: messages
+  defp maybe_filter_messages_by_thread(messages, thread_id), do: Enum.filter(messages, &(&1.thread_id == thread_id))
 
   defp maybe_update_status(message, participants) do
     recipients =

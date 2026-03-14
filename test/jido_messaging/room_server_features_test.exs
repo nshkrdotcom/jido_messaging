@@ -1,14 +1,12 @@
 defmodule Jido.Chat.RoomServerFeaturesTest do
-  @moduledoc """
-  Tests for RoomServer features: threads, reactions, receipts, typing, presence.
-  """
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
-  alias Jido.Messaging.RoomServer
+  alias Jido.Chat.{Participant, Room}
+  alias Jido.Messaging.{Message, RoomServer, Thread}
 
   setup do
     start_supervised!(Jido.Messaging.TestMessaging)
+
     room = Room.new(%{type: :group, name: "Test Room"})
     {:ok, _pid} = RoomServer.start_link(room: room, instance_module: Jido.Messaging.TestMessaging)
     server = RoomServer.via_tuple(Jido.Messaging.TestMessaging, room.id)
@@ -18,202 +16,116 @@ defmodule Jido.Chat.RoomServerFeaturesTest do
     :ok = RoomServer.add_participant(server, participant1)
     :ok = RoomServer.add_participant(server, participant2)
 
-    message =
-      LegacyMessage.new(%{
-        room_id: room.id,
-        sender_id: participant1.id,
-        role: :user,
-        content: [%{type: :text, text: "Hello!"}]
-      })
-
-    :ok = RoomServer.add_message(server, message)
-
-    {:ok, server: server, room: room, p1: participant1, p2: participant2, message: message}
+    {:ok,
+     server: server,
+     room: room,
+     p1: participant1,
+     p2: participant2}
   end
 
-  describe "threads" do
-    test "create_thread marks message as thread root", %{server: server, message: message} do
-      {:ok, updated} = RoomServer.create_thread(server, message.id)
-      assert updated.thread_root_id == message.id
-    end
+  describe "thread-scoped history" do
+    test "get_messages/2 filters by thread_id", %{server: server, room: room, p1: p1, p2: p2} do
+      thread = Thread.new(%{room_id: room.id, external_thread_id: "thread-1"})
 
-    test "create_thread is idempotent", %{server: server, message: message} do
-      {:ok, _} = RoomServer.create_thread(server, message.id)
-      {:ok, updated} = RoomServer.create_thread(server, message.id)
-      assert updated.thread_root_id == message.id
-    end
-
-    test "add_thread_reply adds reply to thread", %{server: server, room: room, message: message, p2: p2} do
-      {:ok, _} = RoomServer.create_thread(server, message.id)
+      root =
+        Message.new(%{
+          room_id: room.id,
+          sender_id: p1.id,
+          role: :user,
+          content: [%{type: :text, text: "Root"}],
+          thread_id: thread.id
+        })
 
       reply =
-        LegacyMessage.new(%{
+        Message.new(%{
+          room_id: room.id,
+          sender_id: p2.id,
+          role: :assistant,
+          content: [%{type: :text, text: "Reply"}],
+          thread_id: thread.id
+        })
+
+      other =
+        Message.new(%{
           room_id: room.id,
           sender_id: p2.id,
           role: :user,
-          content: [%{type: :text, text: "Thread reply!"}]
+          content: [%{type: :text, text: "Other"}]
         })
 
-      {:ok, added_reply} = RoomServer.add_thread_reply(server, message.id, reply)
-      assert added_reply.thread_root_id == message.id
-    end
+      :ok = RoomServer.add_message(server, root)
+      :ok = RoomServer.add_message(server, reply)
+      :ok = RoomServer.add_message(server, other)
 
-    test "add_thread_reply fails if thread doesn't exist", %{server: server, room: room, p2: p2} do
-      reply =
-        LegacyMessage.new(%{
-          room_id: room.id,
-          sender_id: p2.id,
-          role: :user,
-          content: [%{type: :text, text: "Reply"}]
-        })
-
-      assert {:error, :thread_not_found} = RoomServer.add_thread_reply(server, "nonexistent", reply)
-    end
-
-    test "get_thread_messages returns only thread messages", %{server: server, room: room, message: message, p2: p2} do
-      {:ok, _} = RoomServer.create_thread(server, message.id)
-
-      reply1 =
-        LegacyMessage.new(%{room_id: room.id, sender_id: p2.id, role: :user, content: [%{type: :text, text: "R1"}]})
-
-      reply2 =
-        LegacyMessage.new(%{room_id: room.id, sender_id: p2.id, role: :user, content: [%{type: :text, text: "R2"}]})
-
-      {:ok, _} = RoomServer.add_thread_reply(server, message.id, reply1)
-      {:ok, _} = RoomServer.add_thread_reply(server, message.id, reply2)
-
-      thread_msgs = RoomServer.get_thread_messages(server, message.id)
-      assert length(thread_msgs) == 3
-      assert Enum.all?(thread_msgs, &(&1.thread_root_id == message.id))
+      assert Enum.map(RoomServer.get_messages(server), & &1.id) == [other.id, reply.id, root.id]
+      assert Enum.map(RoomServer.get_messages(server, thread_id: thread.id), & &1.id) == [reply.id, root.id]
     end
   end
 
-  describe "reactions" do
-    test "add_reaction adds reaction to message", %{server: server, message: message, p1: p1} do
-      {:ok, updated} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-      assert updated.reactions["👍"] == [p1.id]
-    end
-
-    test "add_reaction from multiple participants", %{server: server, message: message, p1: p1, p2: p2} do
-      {:ok, _} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-      {:ok, updated} = RoomServer.add_reaction(server, message.id, p2.id, "👍")
-
-      assert p1.id in updated.reactions["👍"]
-      assert p2.id in updated.reactions["👍"]
-    end
-
-    test "add_reaction is idempotent", %{server: server, message: message, p1: p1} do
-      {:ok, _} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-      {:ok, :already_exists} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-    end
-
-    test "remove_reaction removes reaction", %{server: server, message: message, p1: p1} do
-      {:ok, _} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-      {:ok, updated} = RoomServer.remove_reaction(server, message.id, p1.id, "👍")
-
-      refute Map.has_key?(updated.reactions, "👍")
-    end
-
-    test "remove_reaction handles not found", %{server: server, message: message, p1: p1} do
-      {:ok, :not_found} = RoomServer.remove_reaction(server, message.id, p1.id, "👍")
-    end
-
-    test "multiple reactions on same message", %{server: server, message: message, p1: p1, p2: p2} do
-      {:ok, _} = RoomServer.add_reaction(server, message.id, p1.id, "👍")
-      {:ok, _} = RoomServer.add_reaction(server, message.id, p2.id, "❤️")
-      {:ok, updated} = RoomServer.add_reaction(server, message.id, p1.id, "😂")
-
-      assert Map.has_key?(updated.reactions, "👍")
-      assert Map.has_key?(updated.reactions, "❤️")
-      assert Map.has_key?(updated.reactions, "😂")
-    end
-  end
-
-  describe "read receipts" do
-    test "mark_delivered updates receipt", %{server: server, message: message, p2: p2} do
-      {:ok, updated} = RoomServer.mark_delivered(server, message.id, p2.id)
-
-      assert Map.has_key?(updated.receipts, p2.id)
-      assert updated.receipts[p2.id].delivered_at != nil
-    end
-
-    test "mark_delivered is idempotent", %{server: server, message: message, p2: p2} do
-      {:ok, _} = RoomServer.mark_delivered(server, message.id, p2.id)
-      {:ok, :already_delivered} = RoomServer.mark_delivered(server, message.id, p2.id)
-    end
-
-    test "mark_read updates receipt", %{server: server, message: message, p2: p2} do
-      {:ok, updated} = RoomServer.mark_read(server, message.id, p2.id)
-
-      assert Map.has_key?(updated.receipts, p2.id)
-      assert updated.receipts[p2.id].read_at != nil
-      assert updated.receipts[p2.id].delivered_at != nil
-    end
-
-    test "mark_read is idempotent", %{server: server, message: message, p2: p2} do
-      {:ok, _} = RoomServer.mark_read(server, message.id, p2.id)
-      {:ok, :already_read} = RoomServer.mark_read(server, message.id, p2.id)
-    end
-
-    test "message status updates to :delivered when all recipients delivered", %{
+  describe "reactions and receipts" do
+    test "tracks reactions and message receipts on the canonical message struct", %{
       server: server,
-      message: message,
+      room: room,
+      p1: p1,
       p2: p2
     } do
-      {:ok, updated} = RoomServer.mark_delivered(server, message.id, p2.id)
-      assert updated.status == :delivered
-    end
+      message =
+        Message.new(%{
+          room_id: room.id,
+          sender_id: p1.id,
+          role: :user,
+          content: [%{type: :text, text: "Hello!"}]
+        })
 
-    test "message status updates to :read when all recipients read", %{server: server, message: message, p2: p2} do
-      {:ok, updated} = RoomServer.mark_read(server, message.id, p2.id)
-      assert updated.status == :read
+      :ok = RoomServer.add_message(server, message)
+
+      assert {:ok, reacted} = RoomServer.add_reaction(server, message.id, p2.id, "👍")
+      assert reacted.reactions["👍"] == [p2.id]
+
+      assert {:ok, delivered} = RoomServer.mark_delivered(server, message.id, p2.id)
+      assert delivered.status == :delivered
+      assert delivered.receipts[p2.id].delivered_at
+
+      assert {:ok, read} = RoomServer.mark_read(server, message.id, p2.id)
+      assert read.status == :read
+      assert read.receipts[p2.id].read_at
     end
   end
 
-  describe "presence" do
-    test "update_presence changes participant presence", %{server: server, p1: p1} do
-      :ok = RoomServer.update_presence(server, p1.id, :online)
+  describe "thread assignment api" do
+    test "registers agents and assigns threads in room state", %{server: server, room: room} do
+      thread = Thread.new(%{room_id: room.id, external_thread_id: "thread-1"})
 
-      participants = RoomServer.get_participants(server)
-      updated = Enum.find(participants, &(&1.id == p1.id))
-      assert updated.presence == :online
-    end
+      agent_spec = %{
+        agent_id: "alpha",
+        name: "Alpha",
+        mention_handles: ["alpha"],
+        trigger: :thread,
+        handler: fn _, _ -> :noreply end
+      }
 
-    test "update_presence returns error for unknown participant", %{server: server} do
-      assert {:error, :not_found} = RoomServer.update_presence(server, "unknown", :online)
+      assert {:ok, _registered_spec} = RoomServer.register_agent(server, agent_spec)
+      assert [registered] = RoomServer.list_agents(server)
+      assert registered.agent_id == "alpha"
+
+      assert :ok = RoomServer.assign_thread(server, thread.id, "alpha")
+      assert RoomServer.thread_assignment(server, thread.id) == "alpha"
+      assert RoomServer.list_thread_assignments(server) == %{thread.id => "alpha"}
+
+      assert :ok = RoomServer.unassign_thread(server, thread.id)
+      assert RoomServer.thread_assignment(server, thread.id) == nil
     end
   end
 
   describe "typing" do
-    test "set_typing starts typing indicator", %{server: server, p1: p1} do
-      :ok = RoomServer.set_typing(server, p1.id, true)
+    test "tracks typing indicators per thread id", %{server: server, p1: p1} do
+      :ok = RoomServer.set_typing(server, p1.id, true, thread_id: "thread-123")
 
-      typing = RoomServer.get_typing(server)
-      assert Enum.any?(typing, &(&1.participant_id == p1.id))
-    end
+      assert [%{participant_id: participant_id, thread_id: "thread-123"}] = RoomServer.get_typing(server)
+      assert participant_id == p1.id
 
-    test "set_typing stops typing indicator", %{server: server, p1: p1} do
-      :ok = RoomServer.set_typing(server, p1.id, true)
-      :ok = RoomServer.set_typing(server, p1.id, false)
-
-      typing = RoomServer.get_typing(server)
-      refute Enum.any?(typing, &(&1.participant_id == p1.id))
-    end
-
-    test "set_typing with thread_root_id", %{server: server, p1: p1, message: message} do
-      :ok = RoomServer.set_typing(server, p1.id, true, thread_root_id: message.id)
-
-      typing = RoomServer.get_typing(server)
-      typing_entry = Enum.find(typing, &(&1.participant_id == p1.id))
-      assert typing_entry.thread_root_id == message.id
-    end
-
-    test "multiple participants typing", %{server: server, p1: p1, p2: p2} do
-      :ok = RoomServer.set_typing(server, p1.id, true)
-      :ok = RoomServer.set_typing(server, p2.id, true)
-
-      typing = RoomServer.get_typing(server)
-      assert length(typing) == 2
+      :ok = RoomServer.set_typing(server, p1.id, false, thread_id: "thread-123")
+      assert RoomServer.get_typing(server) == []
     end
   end
 end

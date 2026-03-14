@@ -3,7 +3,7 @@ defmodule Jido.Chat.RoomServerTest do
 
   import Jido.Messaging.TestHelpers
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
+  alias Jido.Chat.{Participant, Room}
   alias Jido.Messaging.{RoomServer, RoomSupervisor}
 
   defmodule TestMessaging do
@@ -120,7 +120,7 @@ defmodule Jido.Chat.RoomServerTest do
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room)
 
       message =
-        LegacyMessage.new(%{
+        Jido.Messaging.Message.new(%{
           room_id: room.id,
           sender_id: "user_1",
           role: :user,
@@ -138,9 +138,9 @@ defmodule Jido.Chat.RoomServerTest do
       room = Room.new(%{type: :group, name: "Chat"})
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room)
 
-      msg1 = LegacyMessage.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
-      msg2 = LegacyMessage.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
-      msg3 = LegacyMessage.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
+      msg1 = Jido.Messaging.Message.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
+      msg2 = Jido.Messaging.Message.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
+      msg3 = Jido.Messaging.Message.new(%{room_id: room.id, sender_id: "u1", role: :user, content: []})
 
       RoomServer.add_message(pid, msg1)
       RoomServer.add_message(pid, msg2)
@@ -159,11 +159,11 @@ defmodule Jido.Chat.RoomServerTest do
 
       for i <- 1..10 do
         msg =
-          LegacyMessage.new(%{
+          Jido.Messaging.Message.new(%{
             room_id: room.id,
             sender_id: "user_1",
             role: :user,
-            content: [%{type: :text, text: "LegacyMessage #{i}"}]
+            content: [%{type: :text, text: "Message #{i}"}]
           })
 
         RoomServer.add_message(pid, msg)
@@ -179,11 +179,11 @@ defmodule Jido.Chat.RoomServerTest do
 
       for i <- 1..10 do
         msg =
-          LegacyMessage.new(%{
+          Jido.Messaging.Message.new(%{
             room_id: room.id,
             sender_id: "user_1",
             role: :user,
-            content: [%{type: :text, text: "LegacyMessage #{i}"}]
+            content: [%{type: :text, text: "Message #{i}"}]
           })
 
         RoomServer.add_message(pid, msg)
@@ -255,12 +255,21 @@ defmodule Jido.Chat.RoomServerTest do
       room = Room.new(%{type: :group, name: "Chat"})
       {:ok, pid} = RoomSupervisor.start_room(TestMessaging, room, timeout_ms: 50)
 
-      Process.sleep(100)
+      assert_eventually(
+        fn ->
+          assert Process.alive?(pid)
 
-      assert Process.alive?(pid)
+          case Process.info(pid, :current_function) do
+            {:current_function, {_mod, func, _arity}} ->
+              func in [:hibernate, :loop_hibernate]
 
-      {:current_function, {_mod, func, _arity}} = Process.info(pid, :current_function)
-      assert func in [:hibernate, :loop_hibernate]
+            _ ->
+              false
+          end
+        end,
+        timeout: 500,
+        interval: 10
+      )
     end
 
     test "activity resets timeout" do

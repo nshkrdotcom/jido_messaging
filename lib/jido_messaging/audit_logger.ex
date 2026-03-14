@@ -230,14 +230,14 @@ defmodule Jido.Messaging.AuditLogger do
 
   defp format_event([:jido_messaging, :participant, :typing], _measurements, metadata) do
     action = if metadata.is_typing, do: "started", else: "stopped"
-    thread_info = if metadata.thread_root_id, do: " in thread #{metadata.thread_root_id}", else: ""
+    thread_info = if metadata.thread_id, do: " in thread #{metadata.thread_id}", else: ""
     msg = "Participant #{metadata.participant_id} #{action} typing#{thread_info}"
 
     log_meta = [
       room_id: metadata.room_id,
       participant_id: metadata.participant_id,
       is_typing: metadata.is_typing,
-      thread_root_id: metadata.thread_root_id,
+      thread_id: metadata.thread_id,
       correlation_id: metadata.correlation_id
     ]
 

@@ -13,7 +13,7 @@ defmodule Jido.Messaging.InboundRouter do
   alias Jido.Messaging.{BridgeConfig, BridgeServer, ConfigStore, Ingest, IngressOutcome}
 
   @type ingest_result ::
-          {:ok, {:message, Jido.Chat.LegacyMessage.t(), Ingest.context(), EventEnvelope.t()}}
+          {:ok, {:message, Jido.Messaging.Message.t(), Ingest.context(), EventEnvelope.t()}}
           | {:ok, {:duplicate, EventEnvelope.t()}}
           | {:ok, {:event, EventEnvelope.t()}}
           | {:ok, :noop}

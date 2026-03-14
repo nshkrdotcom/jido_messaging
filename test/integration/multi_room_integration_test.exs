@@ -151,8 +151,8 @@ defmodule Jido.Messaging.MultiRoomIntegrationTest do
       # if pubsub_enabled do
       #   reply_a1_id = reply_a1.id
       #   reply_b1_id = reply_b1.id
-      #   assert_receive {:message_added, %Jido.Chat.LegacyMessage{id: ^reply_a1_id}}, 1_000
-      #   assert_receive {:message_added, %Jido.Chat.LegacyMessage{id: ^reply_b1_id}}, 1_000
+      #   assert_receive {:message_added, %Jido.Messaging.Message{id: ^reply_a1_id}}, 1_000
+      #   assert_receive {:message_added, %Jido.Messaging.Message{id: ^reply_b1_id}}, 1_000
       # end
       _ = pubsub_enabled
 
@@ -336,7 +336,7 @@ defmodule Jido.Messaging.MultiRoomIntegrationTest do
 
         # Should receive events only from subscribed room
         msg_sub2_id = msg_sub2.id
-        assert_receive {:message_added, %Jido.Chat.LegacyMessage{id: ^msg_sub2_id}}, 1_000
+        assert_receive {:message_added, %Jido.Messaging.Message{id: ^msg_sub2_id}}, 1_000
         assert_receive {:participant_joined, _}, 1_000
 
         # Drain any remaining events for subscribed room
@@ -404,7 +404,7 @@ defmodule Jido.Messaging.MultiRoomIntegrationTest do
 
       # Add more messages than the limit
       for i <- 501..(500 + message_limit + 10) do
-        {msg, msg_ctx} = ingest!(messaging, "bounded_room", "user_bounded", "LegacyMessage #{i}", i)
+        {msg, msg_ctx} = ingest!(messaging, "bounded_room", "user_bounded", "Message #{i}", i)
         _reply = reply!(messaging, msg, msg_ctx, "Reply #{i}")
       end
 

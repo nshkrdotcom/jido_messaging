@@ -67,7 +67,7 @@ defmodule Jido.Messaging.MixProject do
   defp deps do
     [
       # Runtime dependencies
-      {:jido_chat, github: "agentjido/jido_chat", branch: "main"},
+      {:jido_chat, path: "../jido_chat"},
       {:jason, "~> 1.4"},
       {:zoi, "~> 0.14"},
       {:jido, github: "agentjido/jido", override: true},

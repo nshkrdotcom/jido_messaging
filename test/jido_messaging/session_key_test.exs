@@ -1,8 +1,7 @@
 defmodule Jido.Messaging.SessionKeyTest do
   use ExUnit.Case, async: true
 
-  alias Jido.Messaging.SessionKey
-  alias Jido.Messaging.MsgContext
+  alias Jido.Messaging.{MsgContext, SessionKey}
 
   defmodule MockChannel do
     @behaviour Jido.Chat.Adapter
@@ -18,124 +17,88 @@ defmodule Jido.Messaging.SessionKeyTest do
   end
 
   describe "from_context/1" do
-    test "derives key from MsgContext with external IDs" do
-      ctx = build_context()
-      key = SessionKey.from_context(ctx)
+    test "uses the resolved room_id when available" do
+      ctx =
+        base_context()
+        |> Map.put(:room_id, "room_uuid_456")
 
-      assert key == {:mock, "instance_1", "chat_123", nil}
+      assert SessionKey.from_context(ctx) == {:mock, "instance_1", "room_uuid_456", nil}
     end
 
-    test "prefers room_id over external_room_id when resolved" do
+    test "uses thread_id when present" do
       ctx =
-        build_context()
-        |> resolve_room("room_uuid_456")
+        base_context()
+        |> Map.put(:room_id, "room_uuid")
+        |> Map.put(:thread_id, "thread_123")
 
-      key = SessionKey.from_context(ctx)
-
-      assert key == {:mock, "instance_1", "room_uuid_456", nil}
+      assert SessionKey.from_context(ctx) == {:mock, "instance_1", "room_uuid", "thread_123"}
     end
 
-    test "includes thread_root_id when present" do
+    test "falls back to external_thread_id when thread_id is absent" do
       ctx =
-        build_context()
-        |> resolve_room("room_uuid")
-        |> with_thread("thread_root_123")
+        base_context()
+        |> Map.put(:external_thread_id, "ext-thread-123")
 
-      key = SessionKey.from_context(ctx)
-
-      assert key == {:mock, "instance_1", "room_uuid", "thread_root_123"}
+      assert SessionKey.from_context(ctx) == {:mock, "instance_1", "chat_123", "ext-thread-123"}
     end
   end
 
   describe "to_string/1" do
-    test "formats key without thread" do
-      key = {:telegram, "bot_1", "chat_123", nil}
-      assert SessionKey.to_string(key) == "telegram:bot_1:chat_123"
+    test "formats keys without a thread" do
+      assert SessionKey.to_string({:telegram, "bot_1", "chat_123", nil}) ==
+               "telegram:bot_1:chat_123"
     end
 
-    test "formats key with thread" do
-      key = {:discord, "guild_1", "channel_456", "thread_789"}
-      assert SessionKey.to_string(key) == "discord:guild_1:channel_456:thread_789"
+    test "formats keys with a thread" do
+      assert SessionKey.to_string({:discord, "guild_1", "channel_456", "thread_789"}) ==
+               "discord:guild_1:channel_456:thread_789"
     end
   end
 
   describe "parse/1" do
-    test "parses string without thread" do
-      # Ensure atom exists
+    test "parses a key without thread scope" do
       _ = :telegram
-      assert {:ok, {:telegram, "bot_1", "chat_123", nil}} == SessionKey.parse("telegram:bot_1:chat_123")
+
+      assert SessionKey.parse("telegram:bot_1:chat_123") ==
+               {:ok, {:telegram, "bot_1", "chat_123", nil}}
     end
 
-    test "parses string with thread" do
+    test "parses a key with thread scope" do
       _ = :discord
-      assert {:ok, {:discord, "guild_1", "ch_1", "thread_456"}} == SessionKey.parse("discord:guild_1:ch_1:thread_456")
+
+      assert SessionKey.parse("discord:guild_1:ch_1:thread_456") ==
+               {:ok, {:discord, "guild_1", "ch_1", "thread_456"}}
     end
 
-    test "returns error for invalid format" do
-      assert {:error, :invalid_format} == SessionKey.parse("invalid")
-      assert {:error, :invalid_format} == SessionKey.parse("only:two")
-    end
-
-    test "returns error for non-existent atom" do
-      assert {:error, :invalid_format} == SessionKey.parse("nonexistent_channel_type_xyz:bot:room")
+    test "rejects invalid formats" do
+      assert SessionKey.parse("invalid") == {:error, :invalid_format}
+      assert SessionKey.parse("only:two") == {:error, :invalid_format}
+      assert SessionKey.parse("nonexistent_channel_type_xyz:bot:room") == {:error, :invalid_format}
     end
   end
 
   describe "same_room?/2" do
-    test "returns true for same room regardless of thread" do
+    test "ignores thread scope when comparing room identity" do
       key1 = {:telegram, "bot_1", "chat_123", nil}
       key2 = {:telegram, "bot_1", "chat_123", "thread_456"}
+      key3 = {:telegram, "bot_1", "chat_123", "thread_789"}
 
       assert SessionKey.same_room?(key1, key2)
-      assert SessionKey.same_room?(key2, key1)
+      assert SessionKey.same_room?(key2, key3)
     end
 
-    test "returns true for same room with different threads" do
-      key1 = {:telegram, "bot_1", "chat_123", "thread_1"}
-      key2 = {:telegram, "bot_1", "chat_123", "thread_2"}
-
-      assert SessionKey.same_room?(key1, key2)
-    end
-
-    test "returns false for different rooms" do
-      key1 = {:telegram, "bot_1", "chat_123", nil}
-      key2 = {:telegram, "bot_1", "chat_456", nil}
-
-      refute SessionKey.same_room?(key1, key2)
-    end
-
-    test "returns false for different instances" do
-      key1 = {:telegram, "bot_1", "chat_123", nil}
-      key2 = {:telegram, "bot_2", "chat_123", nil}
-
-      refute SessionKey.same_room?(key1, key2)
-    end
-
-    test "returns false for different channel types" do
-      key1 = {:telegram, "bot_1", "chat_123", nil}
-      key2 = {:discord, "bot_1", "chat_123", nil}
-
-      refute SessionKey.same_room?(key1, key2)
+    test "returns false across different rooms, instances, or channel types" do
+      refute SessionKey.same_room?({:telegram, "bot_1", "chat_123", nil}, {:telegram, "bot_1", "chat_456", nil})
+      refute SessionKey.same_room?({:telegram, "bot_1", "chat_123", nil}, {:telegram, "bot_2", "chat_123", nil})
+      refute SessionKey.same_room?({:telegram, "bot_1", "chat_123", nil}, {:discord, "bot_1", "chat_123", nil})
     end
   end
 
-  # Helper functions
-
-  defp build_context do
-    incoming = %{
+  defp base_context do
+    MsgContext.from_incoming(MockChannel, "instance_1", %{
       external_room_id: "chat_123",
       external_user_id: "user_456",
       text: "Hello"
-    }
-
-    MsgContext.from_incoming(MockChannel, "instance_1", incoming)
-  end
-
-  defp resolve_room(ctx, room_id) do
-    %{ctx | room_id: room_id}
-  end
-
-  defp with_thread(ctx, thread_root_id) do
-    %{ctx | thread_root_id: thread_root_id}
+    })
   end
 end

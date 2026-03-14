@@ -1,14 +1,18 @@
 defmodule Jido.Messaging.StructsTest do
   use ExUnit.Case, async: true
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
-  alias Jido.Messaging.Instance
+  alias Jido.Chat.{Participant, Room}
   alias Jido.Chat.Content.{Text, ToolUse, ToolResult, Image, File, Audio, Video}
+  alias Jido.Messaging.{Context, Instance, Message, MsgContext, Thread}
 
-  describe "LegacyMessage" do
+  defmodule MockChannel do
+    def channel_type, do: :mock
+  end
+
+  describe "Message" do
     test "new/1 creates message with defaults" do
       message =
-        LegacyMessage.new(%{
+        Message.new(%{
           room_id: "room_1",
           sender_id: "user_1",
           role: :user
@@ -27,24 +31,103 @@ defmodule Jido.Messaging.StructsTest do
 
     test "new/1 creates message with threading fields" do
       message =
-        LegacyMessage.new(%{
+        Message.new(%{
           room_id: "room_1",
           sender_id: "user_1",
           role: :user,
           reply_to_id: "msg_prev",
           external_reply_to_id: "ext_prev",
-          thread_root_id: "thread_root_123",
+          thread_id: "thread_root_123",
           external_thread_id: "ext_thread_456"
         })
 
       assert message.reply_to_id == "msg_prev"
       assert message.external_reply_to_id == "ext_prev"
-      assert message.thread_root_id == "thread_root_123"
+      assert message.thread_id == "thread_root_123"
       assert message.external_thread_id == "ext_thread_456"
     end
 
     test "schema/0 returns Zoi schema" do
-      schema = LegacyMessage.schema()
+      schema = Message.schema()
+      assert is_map(schema)
+    end
+  end
+
+  describe "Thread" do
+    test "new/1 creates thread with defaults" do
+      thread =
+        Thread.new(%{
+          room_id: "room_1",
+          external_thread_id: "ext_thread_1",
+          delivery_external_room_id: "thread_channel_1"
+        })
+
+      assert is_binary(thread.id)
+      assert String.starts_with?(thread.id, "jch_")
+      assert thread.room_id == "room_1"
+      assert thread.external_thread_id == "ext_thread_1"
+      assert thread.delivery_external_room_id == "thread_channel_1"
+      assert thread.status == :active
+      assert thread.metadata == %{}
+      assert %DateTime{} = thread.inserted_at
+      assert %DateTime{} = thread.updated_at
+    end
+
+    test "schema/0 returns Zoi schema" do
+      schema = Thread.schema()
+      assert is_map(schema)
+    end
+  end
+
+  describe "Context" do
+    test "new/1 creates context with top-level thread routing fields" do
+      room = Room.new(%{type: :channel, name: "Support"})
+      participant = Participant.new(%{type: :human, identity: %{name: "Alice"}})
+
+      thread =
+        Thread.new(%{
+          room_id: room.id,
+          external_thread_id: "ext_thread_1",
+          delivery_external_room_id: "thread_channel_1"
+        })
+
+      msg_context =
+        MsgContext.from_incoming(MockChannel, "bridge_1", %{
+          external_room_id: "room_ext_1",
+          external_user_id: "user_ext_1",
+          external_thread_id: "ext_thread_1",
+          delivery_external_room_id: "thread_channel_1",
+          text: "Hello"
+        })
+
+      context =
+        Context.new(%{
+          room: room,
+          participant: participant,
+          thread: thread,
+          channel: MockChannel,
+          bridge_id: "bridge_1",
+          channel_type: :mock,
+          external_room_id: "room_ext_1",
+          external_thread_id: "ext_thread_1",
+          delivery_external_room_id: "thread_channel_1",
+          room_id: room.id,
+          thread_id: thread.id,
+          participant_id: participant.id,
+          instance_module: __MODULE__,
+          msg_context: msg_context
+        })
+
+      assert context.room_id == room.id
+      assert context.thread_id == thread.id
+      assert context.external_thread_id == "ext_thread_1"
+      assert context.delivery_external_room_id == "thread_channel_1"
+      assert context[:thread_id] == thread.id
+      assert context[:delivery_external_room_id] == "thread_channel_1"
+    end
+
+    test "schema/0 returns Zoi schema" do
+      schema = Context.schema()
       assert is_map(schema)
     end
   end

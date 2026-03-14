@@ -2,7 +2,7 @@ defmodule Jido.Messaging.Persistence do
   @moduledoc """
   Behaviour for Jido.Messaging storage adapters.
 
-  Adapters provide persistence for rooms, participants, and messages.
+  Adapters provide persistence for rooms, participants, threads, and messages.
   Each adapter instance maintains its own state (e.g., ETS table references)
   to enable multiple isolated messaging instances in the same BEAM.
 
@@ -21,8 +21,8 @@ defmodule Jido.Messaging.Persistence do
       end
   """
 
-  alias Jido.Chat.{LegacyMessage, Participant, Room}
-  alias Jido.Messaging.{BridgeConfig, RoutingPolicy}
+  alias Jido.Chat.{Participant, Room}
+  alias Jido.Messaging.{BridgeConfig, Message, RoutingPolicy, Thread}
 
   @type state :: term()
   @type room_id :: String.t()
@@ -65,16 +65,34 @@ defmodule Jido.Messaging.Persistence do
 
   # Message operations
   @doc "Save a message"
-  @callback save_message(state, LegacyMessage.t()) :: {:ok, LegacyMessage.t()} | {:error, term()}
+  @callback save_message(state, Message.t()) :: {:ok, Message.t()} | {:error, term()}
 
   @doc "Get a message by ID"
-  @callback get_message(state, message_id) :: {:ok, LegacyMessage.t()} | {:error, :not_found}
+  @callback get_message(state, message_id) :: {:ok, Message.t()} | {:error, :not_found}
 
   @doc "Get messages for a room with options (limit, before, after)"
-  @callback get_messages(state, room_id, opts :: keyword()) :: {:ok, [LegacyMessage.t()]}
+  @callback get_messages(state, room_id, opts :: keyword()) :: {:ok, [Message.t()]}
 
   @doc "Delete a message by ID"
   @callback delete_message(state, message_id) :: :ok | {:error, term()}
+
+  # Thread operations
+  @doc "Save a thread"
+  @callback save_thread(state, Thread.t()) :: {:ok, Thread.t()} | {:error, term()}
+
+  @doc "Get a thread by ID"
+  @callback get_thread(state, String.t()) :: {:ok, Thread.t()} | {:error, :not_found}
+
+  @doc "Get a thread by room and external thread ID"
+  @callback get_thread_by_external_id(state, room_id(), String.t()) ::
+              {:ok, Thread.t()} | {:error, :not_found}
+
+  @doc "Get a thread by root message ID"
+  @callback get_thread_by_root_message(state, room_id(), message_id()) ::
+              {:ok, Thread.t()} | {:error, :not_found}
+
+  @doc "List threads for a room"
+  @callback list_threads(state, room_id(), opts :: keyword()) :: {:ok, [Thread.t()]}
 
   # External ID resolution (for channel mapping)
   @doc """
@@ -111,7 +129,7 @@ defmodule Jido.Messaging.Persistence do
   Used for resolving reply_to references from external platforms.
   """
   @callback get_message_by_external_id(state, channel, bridge_id, external_id) ::
-              {:ok, LegacyMessage.t()} | {:error, :not_found}
+              {:ok, Message.t()} | {:error, :not_found}
 
   @doc """
   Update a message's external_id after successful channel delivery.
@@ -119,7 +137,7 @@ defmodule Jido.Messaging.Persistence do
   Used to record the external platform's message ID after sending.
   """
   @callback update_message_external_id(state, message_id, external_id) ::
-              {:ok, LegacyMessage.t()} | {:error, term()}
+              {:ok, Message.t()} | {:error, term()}
 
   # Room binding operations
 

@@ -1,7 +1,6 @@
 defmodule Jido.Messaging.IngestTest do
   use ExUnit.Case, async: true
 
-  alias Jido.Chat.LegacyMessage
   alias Jido.Messaging.Ingest
 
   defmodule TestMessaging do
@@ -117,7 +116,7 @@ defmodule Jido.Messaging.IngestTest do
     @behaviour Jido.Messaging.Moderation
 
     @impl true
-    def moderate(%LegacyMessage{} = message, _opts) do
+    def moderate(%Jido.Messaging.Message{} = message, _opts) do
       modified =
         %{
           message
@@ -247,7 +246,7 @@ defmodule Jido.Messaging.IngestTest do
       incoming1 = %{
         external_room_id: "chat_1",
         external_user_id: "same_user",
-        text: "LegacyMessage 1",
+        text: "Message 1",
         external_message_id: 2001
       }
 
@@ -256,7 +255,7 @@ defmodule Jido.Messaging.IngestTest do
       incoming2 = %{
         external_room_id: "chat_2",
         external_user_id: "same_user",
-        text: "LegacyMessage 2",
+        text: "Message 2",
         external_message_id: 2002
       }
 

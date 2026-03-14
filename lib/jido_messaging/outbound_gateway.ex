@@ -250,7 +250,8 @@ defmodule Jido.Messaging.OutboundGateway do
   defp build_request(instance_module, operation, context, payload, external_message_id, opts) do
     bridge_id = context_bridge_id(context)
     delivery_policy = delivery_policy(instance_module, bridge_id)
-    context_external_room_id = Map.get(context, :external_room_id)
+    context_external_room_id =
+      Map.get(context, :delivery_external_room_id) || Map.get(context, :external_room_id)
     session_key = context_session_key(context, bridge_id, context_external_room_id)
 
     {external_room_id, route_resolution} =
@@ -262,22 +263,30 @@ defmodule Jido.Messaging.OutboundGateway do
         context_external_room_id
       )
 
+    request_opts =
+      opts
+      |> Keyword.put_new(:external_thread_id, context[:external_thread_id])
+      |> Keyword.put_new(:delivery_external_room_id, context[:delivery_external_room_id])
+
     %{
       operation: operation,
       channel: Map.get(context, :channel),
       bridge_id: bridge_id,
       external_room_id: external_room_id,
       payload: payload,
-      opts: opts,
+      opts: request_opts,
       external_message_id: external_message_id,
       routing_key: routing_key(bridge_id, external_room_id),
       session_key: session_key,
       route_resolution: route_resolution,
-      idempotency_key: keyword_or_map_get(opts, :idempotency_key),
-      max_attempts: keyword_or_map_get(opts, :max_attempts) || delivery_policy.max_attempts,
-      base_backoff_ms: keyword_or_map_get(opts, :base_backoff_ms) || delivery_policy.base_backoff_ms,
-      max_backoff_ms: keyword_or_map_get(opts, :max_backoff_ms) || delivery_policy.max_backoff_ms,
-      priority: normalize_priority(keyword_or_map_get(opts, :priority))
+      idempotency_key: keyword_or_map_get(request_opts, :idempotency_key),
+      max_attempts:
+        keyword_or_map_get(request_opts, :max_attempts) || delivery_policy.max_attempts,
+      base_backoff_ms:
+        keyword_or_map_get(request_opts, :base_backoff_ms) || delivery_policy.base_backoff_ms,
+      max_backoff_ms:
+        keyword_or_map_get(request_opts, :max_backoff_ms) || delivery_policy.max_backoff_ms,
+      priority: normalize_priority(keyword_or_map_get(request_opts, :priority))
     }
   end
 
@@ -391,7 +400,7 @@ defmodule Jido.Messaging.OutboundGateway do
   end
 
   defp context_thread_id(context) do
-    thread_id = context[:thread_root_id] || context[:external_thread_id] || context[:thread_id]
+    thread_id = context[:thread_id] || context[:external_thread_id]
     if is_binary(thread_id), do: thread_id, else: nil
   end
 

@@ -237,10 +237,13 @@ Message Flow:
 ### Message (Canonical)
 
 ```elixir
-%Jido.Chat.LegacyMessage{
+%Jido.Messaging.Message{
   id: "msg_abc123",
   room_id: "room_xyz",
   sender_id: "user_123",
+  thread_id: "thread_123",
+  external_thread_id: "platform_thread_123",
+  delivery_external_room_id: "platform_delivery_target_123",
   role: :user | :assistant | :system | :tool,
   content: [%Content.Text{text: "Hello"}],
   status: :sending | :sent | :delivered | :read | :failed,
