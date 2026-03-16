@@ -204,8 +204,7 @@ defmodule Jido.Messaging.Ingest do
           channel_type: channel_type,
           external_room_id: to_string(external_room_id),
           external_thread_id: resolved_msg_context.external_thread_id,
-          delivery_external_room_id:
-            resolved_msg_context.delivery_external_room_id || to_string(external_room_id),
+          delivery_external_room_id: resolved_msg_context.delivery_external_room_id || to_string(external_room_id),
           room_id: room.id,
           thread_id: resolved_msg_context.thread_id,
           participant_id: participant.id,
@@ -246,8 +245,7 @@ defmodule Jido.Messaging.Ingest do
       bridge_id: bridge_id,
       room_id: room.id,
       thread_id: msg_context.thread_id || msg_context.external_thread_id,
-      external_room_id:
-        to_string(msg_context.delivery_external_room_id || external_room_id)
+      external_room_id: to_string(msg_context.delivery_external_room_id || external_room_id)
     }
 
     case SessionManager.set(messaging_module, SessionKey.from_context(msg_context), route) do
@@ -316,10 +314,8 @@ defmodule Jido.Messaging.Ingest do
         external_id: incoming[:external_message_id],
         external_reply_to_id: stringify_if_present(incoming[:external_reply_to_id]),
         thread_id: thread && thread.id,
-        external_thread_id:
-          incoming[:external_thread_id] || (thread && thread.external_thread_id),
-        delivery_external_room_id:
-          incoming[:delivery_external_room_id] || (thread && thread.delivery_external_room_id),
+        external_thread_id: incoming[:external_thread_id] || (thread && thread.external_thread_id),
+        delivery_external_room_id: incoming[:delivery_external_room_id] || (thread && thread.delivery_external_room_id),
         status: :sent,
         metadata: build_metadata(incoming, channel_type, bridge_id, media_metadata)
       }
@@ -387,7 +383,7 @@ defmodule Jido.Messaging.Ingest do
       {:ok, agent_id} ->
         if incoming[:external_message_id] do
           with {:ok, result} <-
-                 Jido.Chat.Adapter.open_thread(
+                 open_thread(
                    channel_module,
                    incoming.external_room_id,
                    incoming.external_message_id,
@@ -396,9 +392,7 @@ defmodule Jido.Messaging.Ingest do
                {:ok, thread} <-
                  get_or_create_thread(messaging_module, room.id, %{
                    external_thread_id:
-                     stringify_if_present(
-                       result[:external_thread_id] || result["external_thread_id"]
-                     ),
+                     stringify_if_present(result[:external_thread_id] || result["external_thread_id"]),
                    delivery_external_room_id:
                      stringify_if_present(
                        result[:delivery_external_room_id] || result["delivery_external_room_id"] ||
@@ -423,6 +417,24 @@ defmodule Jido.Messaging.Ingest do
     end
   end
 
+  defp open_thread(channel_module, external_room_id, external_message_id, opts) do
+    cond do
+      function_exported?(Jido.Chat.Adapter, :open_thread, 4) ->
+        apply(Jido.Chat.Adapter, :open_thread, [
+          channel_module,
+          external_room_id,
+          external_message_id,
+          opts
+        ])
+
+      function_exported?(channel_module, :open_thread, 3) ->
+        apply(channel_module, :open_thread, [external_room_id, external_message_id, opts])
+
+      true ->
+        {:error, :unsupported}
+    end
+  end
+
   defp get_or_create_thread(messaging_module, room_id, attrs) do
     external_thread_id = attrs[:external_thread_id]
 
@@ -443,10 +455,8 @@ defmodule Jido.Messaging.Ingest do
     updated_thread =
       thread
       |> Map.merge(%{
-        delivery_external_room_id:
-          attrs[:delivery_external_room_id] || thread.delivery_external_room_id,
-        root_external_message_id:
-          attrs[:root_external_message_id] || thread.root_external_message_id,
+        delivery_external_room_id: attrs[:delivery_external_room_id] || thread.delivery_external_room_id,
+        root_external_message_id: attrs[:root_external_message_id] || thread.root_external_message_id,
         metadata: Map.merge(thread.metadata || %{}, attrs[:metadata] || %{}),
         updated_at: DateTime.utc_now()
       })
@@ -467,8 +477,14 @@ defmodule Jido.Messaging.Ingest do
   defp maybe_assign_thread({:error, _reason} = error, _messaging_module, _room_server, _room_id, _msg_context),
     do: error
 
-  defp assign_resolved_thread(_messaging_module, _room_server, _room_id, %Thread{assigned_agent_id: agent_id} = thread, agent_id),
-    do: {:ok, thread}
+  defp assign_resolved_thread(
+         _messaging_module,
+         _room_server,
+         _room_id,
+         %Thread{assigned_agent_id: agent_id} = thread,
+         agent_id
+       ),
+       do: {:ok, thread}
 
   defp assign_resolved_thread(messaging_module, _room_server, room_id, %Thread{} = thread, agent_id) do
     case Jido.Messaging.assign_thread(messaging_module, room_id, thread.id, agent_id) do
@@ -534,8 +550,7 @@ defmodule Jido.Messaging.Ingest do
       msg_context
       | thread_id: message.thread_id,
         external_thread_id: message.external_thread_id,
-        delivery_external_room_id:
-          message.delivery_external_room_id || stringify_if_present(external_room_id)
+        delivery_external_room_id: message.delivery_external_room_id || stringify_if_present(external_room_id)
     }
   end
 
@@ -544,8 +559,7 @@ defmodule Jido.Messaging.Ingest do
       msg_context
       | thread_id: thread.id,
         external_thread_id: thread.external_thread_id,
-        delivery_external_room_id:
-          thread.delivery_external_room_id || stringify_if_present(external_room_id)
+        delivery_external_room_id: thread.delivery_external_room_id || stringify_if_present(external_room_id)
     }
   end
 
