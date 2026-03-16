@@ -259,5 +259,4 @@ defmodule Jido.Messaging.Demo.BridgeTest do
       assert Process.whereis(Bridge) != nil || true
     end
   end
-
 end

@@ -250,8 +250,10 @@ defmodule Jido.Messaging.OutboundGateway do
   defp build_request(instance_module, operation, context, payload, external_message_id, opts) do
     bridge_id = context_bridge_id(context)
     delivery_policy = delivery_policy(instance_module, bridge_id)
+
     context_external_room_id =
       Map.get(context, :delivery_external_room_id) || Map.get(context, :external_room_id)
+
     session_key = context_session_key(context, bridge_id, context_external_room_id)
 
     {external_room_id, route_resolution} =
@@ -280,12 +282,9 @@ defmodule Jido.Messaging.OutboundGateway do
       session_key: session_key,
       route_resolution: route_resolution,
       idempotency_key: keyword_or_map_get(request_opts, :idempotency_key),
-      max_attempts:
-        keyword_or_map_get(request_opts, :max_attempts) || delivery_policy.max_attempts,
-      base_backoff_ms:
-        keyword_or_map_get(request_opts, :base_backoff_ms) || delivery_policy.base_backoff_ms,
-      max_backoff_ms:
-        keyword_or_map_get(request_opts, :max_backoff_ms) || delivery_policy.max_backoff_ms,
+      max_attempts: keyword_or_map_get(request_opts, :max_attempts) || delivery_policy.max_attempts,
+      base_backoff_ms: keyword_or_map_get(request_opts, :base_backoff_ms) || delivery_policy.base_backoff_ms,
+      max_backoff_ms: keyword_or_map_get(request_opts, :max_backoff_ms) || delivery_policy.max_backoff_ms,
       priority: normalize_priority(keyword_or_map_get(request_opts, :priority))
     }
   end

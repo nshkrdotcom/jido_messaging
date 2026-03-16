@@ -32,6 +32,7 @@ defmodule Jido.Messaging do
   alias Jido.Chat.{Participant, Room}
   alias Jido.Messaging.BridgeRoomSpec
   alias Jido.Messaging.TopologyValidator
+
   alias Jido.Messaging.{
     AgentRunner,
     AgentSupervisor,
@@ -931,6 +932,7 @@ defmodule Jido.Messaging do
          {:ok, room_server} <- ensure_room_server(instance_module, room_id),
          {:ok, agent_spec} <- room_server_get_agent(room_server, agent_id) do
       previous_agent_id = room_server_thread_assignment(room_server, thread_id) || thread.assigned_agent_id
+
       previous_agent_spec =
         registered_agent_spec(instance_module, room_id, thread_id, room_server, previous_agent_id)
 
@@ -952,7 +954,16 @@ defmodule Jido.Messaging do
 
           case stop_thread_runner(instance_module, room_id, thread_id, previous_agent_id) do
             :ok ->
-              case assign_thread_state(runtime, room_server, instance_module, room_id, thread_id, agent_id, agent_spec, updated_thread) do
+              case assign_thread_state(
+                     runtime,
+                     room_server,
+                     instance_module,
+                     room_id,
+                     thread_id,
+                     agent_id,
+                     agent_spec,
+                     updated_thread
+                   ) do
                 {:ok, persisted_thread} ->
                   {:ok, persisted_thread}
 
@@ -985,6 +996,7 @@ defmodule Jido.Messaging do
          :ok <- ensure_thread_room(thread, room_id),
          {:ok, room_server} <- ensure_room_server(instance_module, room_id) do
       assigned_agent_id = room_server_thread_assignment(room_server, thread_id) || thread.assigned_agent_id
+
       assigned_agent_spec =
         registered_agent_spec(instance_module, room_id, thread_id, room_server, assigned_agent_id)
 
@@ -1467,7 +1479,16 @@ defmodule Jido.Messaging do
     end
   end
 
-  defp assign_thread_state(runtime, room_server, instance_module, room_id, thread_id, agent_id, agent_spec, updated_thread) do
+  defp assign_thread_state(
+         runtime,
+         room_server,
+         instance_module,
+         room_id,
+         thread_id,
+         agent_id,
+         agent_spec,
+         updated_thread
+       ) do
     with {:ok, persisted_thread} <- persist_thread_assignment(runtime, updated_thread),
          :ok <- room_server_assign_thread(room_server, thread_id, agent_id),
          {:ok, _pid} <- start_thread_runner(instance_module, room_id, thread_id, agent_id, agent_spec) do
@@ -1482,7 +1503,13 @@ defmodule Jido.Messaging do
     end
   end
 
-  defp rollback_thread_assignment(instance_module, runtime, room_server, %Thread{} = original_thread, previous_agent_spec) do
+  defp rollback_thread_assignment(
+         instance_module,
+         runtime,
+         room_server,
+         %Thread{} = original_thread,
+         previous_agent_spec
+       ) do
     with {:ok, _thread} <- save_thread_struct(runtime, original_thread),
          :ok <- restore_room_server_assignment(room_server, original_thread, previous_agent_spec),
          :ok <- restore_thread_runner(instance_module, original_thread, previous_agent_spec) do
@@ -1509,10 +1536,16 @@ defmodule Jido.Messaging do
 
   defp restore_thread_runner(_instance_module, %Thread{assigned_agent_id: nil}, _previous_agent_spec), do: :ok
 
-  defp restore_thread_runner(instance_module, %Thread{room_id: room_id, id: thread_id, assigned_agent_id: agent_id}, agent_spec)
+  defp restore_thread_runner(
+         instance_module,
+         %Thread{room_id: room_id, id: thread_id, assigned_agent_id: agent_id},
+         agent_spec
+       )
        when is_binary(agent_id) and is_map(agent_spec) do
     case AgentRunner.whereis(instance_module, room_id, thread_id, agent_id) do
-      pid when is_pid(pid) -> :ok
+      pid when is_pid(pid) ->
+        :ok
+
       nil ->
         case start_thread_runner(instance_module, room_id, thread_id, agent_id, agent_spec) do
           {:ok, _pid} -> :ok

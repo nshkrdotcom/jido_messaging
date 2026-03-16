@@ -11,6 +11,7 @@ defmodule Jido.Messaging.AgentSupervisor do
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
+
     case DynamicSupervisor.start_link(__MODULE__, opts, name: name) do
       {:ok, _pid} = ok ->
         maybe_restore_assigned_runners(Keyword.get(opts, :instance_module))

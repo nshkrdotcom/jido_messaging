@@ -322,5 +322,4 @@ defmodule Jido.Messaging.Demo.Bridge do
 
   defp normalize_module(other),
     do: raise(ArgumentError, "invalid adapter module configuration: #{inspect(other)}")
-
 end

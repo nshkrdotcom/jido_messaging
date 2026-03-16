@@ -341,12 +341,14 @@ defmodule Jido.Messaging.RoomServer do
   @impl true
   def handle_call({:unregister_agent, agent_id}, _from, state) do
     registered_agents = Map.delete(state.registered_agents, agent_id)
+
     thread_assignments =
       state.thread_assignments
       |> Enum.reject(fn {_thread_id, assigned_agent_id} -> assigned_agent_id == agent_id end)
       |> Map.new()
 
-    {:reply, :ok, %{state | registered_agents: registered_agents, thread_assignments: thread_assignments}, state.timeout_ms}
+    {:reply, :ok, %{state | registered_agents: registered_agents, thread_assignments: thread_assignments},
+     state.timeout_ms}
   end
 
   @impl true

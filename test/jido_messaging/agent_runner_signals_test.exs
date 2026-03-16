@@ -30,6 +30,7 @@ defmodule Jido.Messaging.AgentRunnerSignalsTest do
   describe "agent lifecycle telemetry" do
     test "emits triggered, started, and completed for successful processing" do
       test_pid = self()
+
       %{room: room, thread: thread, room_pid: room_pid} =
         room_with_assignment("alpha", fn _message, _context ->
           :noreply
@@ -75,6 +76,7 @@ defmodule Jido.Messaging.AgentRunnerSignalsTest do
 
     test "emits failed when the handler returns an error" do
       test_pid = self()
+
       %{room: room, thread: thread, room_pid: room_pid} =
         room_with_assignment("alpha", fn _message, _context ->
           {:error, :intentional_failure}
@@ -129,7 +131,8 @@ defmodule Jido.Messaging.AgentRunnerSignalsTest do
 
   defp attach_signal_handlers(test_pid, events) do
     Enum.map(events, fn event ->
-      handler_id = "agent-signal-#{Enum.join(Enum.map(event, &Atom.to_string/1), "-")}-#{System.unique_integer([:positive])}"
+      handler_id =
+        "agent-signal-#{Enum.join(Enum.map(event, &Atom.to_string/1), "-")}-#{System.unique_integer([:positive])}"
 
       :telemetry.attach(
         handler_id,

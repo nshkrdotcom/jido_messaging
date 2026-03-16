@@ -111,9 +111,7 @@ defmodule Jido.Messaging.AgentRunner do
     register_as_participant(state)
     send(self(), :subscribe)
 
-    Logger.debug(
-      "[Jido.Messaging.AgentRunner] Agent #{agent_id} started in room #{room_id} thread #{thread_id}"
-    )
+    Logger.debug("[Jido.Messaging.AgentRunner] Agent #{agent_id} started in room #{room_id} thread #{thread_id}")
 
     {:ok, state}
   end
@@ -233,8 +231,7 @@ defmodule Jido.Messaging.AgentRunner do
       %{
         delivery_context
         | thread_id: state.thread_id,
-          external_thread_id:
-            delivery_context.external_thread_id || original_message.external_thread_id,
+          external_thread_id: delivery_context.external_thread_id || original_message.external_thread_id,
           delivery_external_room_id:
             delivery_context.delivery_external_room_id || original_message.delivery_external_room_id
       }

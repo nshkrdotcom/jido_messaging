@@ -52,8 +52,7 @@ defmodule Jido.Messaging.Deliver do
       reply_to_id: original_message.id,
       thread_id: original_message.thread_id,
       external_thread_id: context[:external_thread_id] || original_message.external_thread_id,
-      delivery_external_room_id:
-        context[:delivery_external_room_id] || original_message.delivery_external_room_id,
+      delivery_external_room_id: context[:delivery_external_room_id] || original_message.delivery_external_room_id,
       status: :sending,
       metadata:
         %{
@@ -243,7 +242,12 @@ defmodule Jido.Messaging.Deliver do
           }
 
           {:ok, persisted_message} = messaging_module.save_message_struct(updated_message)
-          add_to_room_server(messaging_module, room_id, persisted_message, %{room_id: room_id, instance_module: messaging_module})
+
+          add_to_room_server(messaging_module, room_id, persisted_message, %{
+            room_id: room_id,
+            instance_module: messaging_module
+          })
+
           Signal.emit_sent(persisted_message, %{room_id: room_id, instance_module: messaging_module})
           {:ok, persisted_message}
 

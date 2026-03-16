@@ -163,8 +163,7 @@ defmodule Jido.Messaging.MsgContext do
         reply_to_id: message.reply_to_id,
         thread_id: message.thread_id,
         external_thread_id: message.external_thread_id || ctx.external_thread_id,
-        delivery_external_room_id:
-          message.delivery_external_room_id || ctx.delivery_external_room_id
+        delivery_external_room_id: message.delivery_external_room_id || ctx.delivery_external_room_id
     }
   end
 

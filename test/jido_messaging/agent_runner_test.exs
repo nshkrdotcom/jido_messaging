@@ -233,9 +233,12 @@ defmodule Jido.Messaging.AgentRunnerTest do
 
       assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-      assert_eventually(fn ->
-        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
-      end, timeout: 500)
+      assert_eventually(
+        fn ->
+          AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+        end,
+        timeout: 500
+      )
 
       original_runner = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
       agent_supervisor_name = TestMessaging.__jido_messaging__(:agent_supervisor)
@@ -244,13 +247,16 @@ defmodule Jido.Messaging.AgentRunnerTest do
 
       Process.exit(original_supervisor, :kill)
 
-      assert_eventually(fn ->
-        restarted_supervisor = Process.whereis(agent_supervisor_name)
-        restarted_runner = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
+      assert_eventually(
+        fn ->
+          restarted_supervisor = Process.whereis(agent_supervisor_name)
+          restarted_runner = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
 
-        is_pid(restarted_supervisor) and restarted_supervisor != original_supervisor and
-          is_pid(restarted_runner) and restarted_runner != original_runner
-      end, timeout: 1_000)
+          is_pid(restarted_supervisor) and restarted_supervisor != original_supervisor and
+            is_pid(restarted_runner) and restarted_runner != original_runner
+        end,
+        timeout: 1_000
+      )
 
       assert {:ok, "alpha"} = TestMessaging.thread_assignment(room.id, thread.id)
     end
@@ -268,9 +274,12 @@ defmodule Jido.Messaging.AgentRunnerTest do
 
       assert {:ok, _assigned_thread} = TestMessaging.assign_thread(room.id, thread.id, "alpha")
 
-      assert_eventually(fn ->
-        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
-      end, timeout: 500)
+      assert_eventually(
+        fn ->
+          AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") != nil
+        end,
+        timeout: 500
+      )
 
       original_room_server = ensure_room_server!(room)
       runner_pid = AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha")
@@ -467,9 +476,13 @@ defmodule Jido.Messaging.AgentRunnerTest do
 
       assert {:ok, persisted_thread} = TestMessaging.get_thread(thread.id)
       assert is_nil(persisted_thread.assigned_agent_id)
-      assert_eventually(fn ->
-        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
-      end, timeout: 500)
+
+      assert_eventually(
+        fn ->
+          AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
+        end,
+        timeout: 500
+      )
     end
 
     test "unregister_agent/2 clears persisted assignments even when room state lost the thread mapping" do
@@ -498,9 +511,13 @@ defmodule Jido.Messaging.AgentRunnerTest do
 
       assert {:ok, persisted_thread} = TestMessaging.get_thread(thread.id)
       assert is_nil(persisted_thread.assigned_agent_id)
-      assert_eventually(fn ->
-        AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
-      end, timeout: 500)
+
+      assert_eventually(
+        fn ->
+          AgentRunner.whereis(TestMessaging, room.id, thread.id, "alpha") == nil
+        end,
+        timeout: 500
+      )
     end
   end
 
@@ -547,18 +564,24 @@ defmodule Jido.Messaging.AgentRunnerTest do
     :ok = :sys.suspend(supervisor_pid)
     Process.exit(agent_supervisor_pid, :kill)
 
-    assert_eventually(fn ->
-      Process.whereis(agent_supervisor_name) == nil
-    end, timeout: 500)
+    assert_eventually(
+      fn ->
+        Process.whereis(agent_supervisor_name) == nil
+      end,
+      timeout: 500
+    )
 
     try do
       fun.()
     after
       :ok = :sys.resume(supervisor_pid)
 
-      assert_eventually(fn ->
-        is_pid(Process.whereis(agent_supervisor_name))
-      end, timeout: 500)
+      assert_eventually(
+        fn ->
+          is_pid(Process.whereis(agent_supervisor_name))
+        end,
+        timeout: 500
+      )
     end
   end
 end

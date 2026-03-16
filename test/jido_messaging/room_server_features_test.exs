@@ -16,11 +16,7 @@ defmodule Jido.Chat.RoomServerFeaturesTest do
     :ok = RoomServer.add_participant(server, participant1)
     :ok = RoomServer.add_participant(server, participant2)
 
-    {:ok,
-     server: server,
-     room: room,
-     p1: participant1,
-     p2: participant2}
+    {:ok, server: server, room: room, p1: participant1, p2: participant2}
   end
 
   describe "thread-scoped history" do

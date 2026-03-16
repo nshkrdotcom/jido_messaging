@@ -17,8 +17,7 @@ defmodule Jido.Messaging.Message do
               thread_id: Zoi.string() |> Zoi.nullish(),
               external_thread_id: Zoi.string() |> Zoi.nullish(),
               delivery_external_room_id: Zoi.string() |> Zoi.nullish(),
-              status:
-                Zoi.enum([:sending, :sent, :delivered, :read, :failed]) |> Zoi.default(:sending),
+              status: Zoi.enum([:sending, :sent, :delivered, :read, :failed]) |> Zoi.default(:sending),
               reactions: Zoi.map() |> Zoi.default(%{}),
               receipts: Zoi.map() |> Zoi.default(%{}),
               metadata: Zoi.map() |> Zoi.default(%{}),
