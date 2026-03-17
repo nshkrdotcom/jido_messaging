@@ -9,7 +9,7 @@ defmodule Jido.Messaging.MixProject do
     [
       app: :jido_messaging,
       version: @version,
-      elixir: "~> 1.17",
+      elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -70,9 +70,9 @@ defmodule Jido.Messaging.MixProject do
       jido_dep_git(:jido_chat, "../jido_chat", "agentjido/jido_chat", "main"),
       {:jason, "~> 1.4"},
       {:zoi, "~> 0.14"},
-      {:jido, github: "agentjido/jido", override: true},
-      {:jido_signal, github: "agentjido/jido_signal", override: true},
-      {:jido_ai, github: "agentjido/jido_ai"},
+      {:jido, "~> 2.1"},
+      {:jido_signal, "~> 2.0"},
+      {:jido_ai, "~> 2.0"},
       {:yaml_elixir, "~> 2.12"},
       {:plug, "~> 1.16"},
 
